@@ -28,11 +28,11 @@ jobs:
           ./scripts/build-windows.ps1
       - name: Portable smoke test
         run: |
-          & ./dist/easy-switch-link-0.2.0-windows-x64.exe --help | Out-String
+          & ./dist/easy-switch-link-0.2.1-windows-x64.exe --help | Out-String
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: MSI install and uninstall smoke test
         run: |
-          $msi = (Resolve-Path ./dist/easy-switch-link-0.2.0-windows-x64.msi).Path
+          $msi = (Resolve-Path ./dist/easy-switch-link-0.2.1-windows-x64.msi).Path
           $install = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", '/qn', '/norestart') -Wait -PassThru -WindowStyle Hidden
           if ($install.ExitCode -notin @(0,3010)) { throw "MSI install failed: $($install.ExitCode)" }
           & "$env:LOCALAPPDATA/Easy-Switch Link/easy-switch-link.exe" --version | Out-String
@@ -80,9 +80,9 @@ jobs:
           bash scripts/build-linux.sh '${{ matrix.target }}'
       - name: Package and portable smoke tests
         run: |
-          dist/easy-switch-link-0.2.0-linux-${{ matrix.arch }} --help
-          dpkg-deb --info dist/easy-switch-link_0.2.0_${{ matrix.arch }}.deb
-          apt-get install -y ./dist/easy-switch-link_0.2.0_${{ matrix.arch }}.deb
+          dist/easy-switch-link-0.2.1-linux-${{ matrix.arch }} --help
+          dpkg-deb --info dist/easy-switch-link_0.2.1_${{ matrix.arch }}.deb
+          apt-get install -y ./dist/easy-switch-link_0.2.1_${{ matrix.arch }}.deb
           easy-switch-link --version
           easy-switch-link --config-dir /tmp/esl-smoke run --headless &
           monitor=$!
@@ -95,6 +95,6 @@ jobs:
         with:
           name: linux-${{ matrix.arch }}
           path: |
-            dist/easy-switch-link-0.2.0-linux-${{ matrix.arch }}
+            dist/easy-switch-link-0.2.1-linux-${{ matrix.arch }}
             dist/*_${{ matrix.arch }}.deb
             dist/SHA256SUMS-linux-${{ matrix.arch }}.txt

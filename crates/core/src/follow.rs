@@ -279,6 +279,10 @@ impl FollowConfig {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DesktopState {
+    #[serde(default)]
+    pub cursor_hidden: bool,
+    #[serde(default)]
+    pub cursor_visibility: String,
     pub backend: String,
     pub displays: Vec<Display>,
     pub generation: u64,

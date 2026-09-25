@@ -5,13 +5,17 @@ use windows::{
         Foundation::*,
         Graphics::Gdi::*,
         System::{LibraryLoader::GetModuleHandleW, RemoteDesktop::*, StationsAndDesktops::*},
-        UI::{HiDpi::*, Input::KeyboardAndMouse::*, Input::*, WindowsAndMessaging::*},
+        UI::{
+            HiDpi::*, Input::KeyboardAndMouse::*, Input::*, Magnification::*,
+            WindowsAndMessaging::*,
+        },
     },
     core::w,
 };
 const CONTROL: u32 = WM_APP + 41;
 thread_local! {static LOOP:RefCell<Option<Loop>>=const{RefCell::new(None)};}
 struct Loop {
+    cursor: CursorGuard,
     model: Model,
     commands: mpsc::Receiver<Command>,
 }
@@ -135,9 +139,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
                             size_of::<RAWINPUTHEADER>() as u32,
                         )
                     };
-                    if count != u32::MAX && input.header.dwType == RIM_TYPEKEYBOARD.0 {
-                        state.model.state.input_serial =
-                            state.model.state.input_serial.wrapping_add(1);
+                    if count >= size_of::<RAWINPUTHEADER>() as u32 && count != u32::MAX {
+                        state.model.input();
                     }
                     if count != u32::MAX
                         && input.header.dwType == RIM_TYPEMOUSE.0
@@ -199,7 +202,16 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
                 CONTROL => {
                     while let Ok(c) = state.commands.try_recv() {
                         match c {
+                            Command::Restore(reply) => {
+                                state.model.cursor.restore();
+                                state.cursor.sync(&mut state.model);
+                                let _ = reply.send(());
+                            }
+                            Command::Depart { crossing, written } => {
+                                state.model.cursor.depart(crossing, written, Instant::now());
+                            }
                             Command::Configure { enabled, rules } => {
+                                state.model.cursor.restore();
                                 state.model.enabled = enabled;
                                 state.model.rules = rules;
                                 if !enabled {
@@ -246,12 +258,19 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
                                 }
                             }
                             Command::Complete(id) => state.model.complete(id),
-                            Command::Stop => unsafe { PostQuitMessage(0) },
+                            Command::Stop => {
+                                state.model.cursor.restore();
+                                unsafe { PostQuitMessage(0) };
+                            }
                         }
                     }
                 }
                 _ => {}
             }
+            if state.model.state.locked || !state.model.enabled {
+                state.model.cursor.restore();
+            }
+            state.cursor.sync(&mut state.model);
         }
     });
     unsafe { DefWindowProcW(hwnd, msg, w, l) }
@@ -308,13 +327,23 @@ pub fn start(
                     model.state.locked = !active_desktop();
                     model.state.pointer = point();
                     model.topology(displays());
-                    LOOP.with(|s| *s.borrow_mut() = Some(Loop { model, commands }));
+                    let cursor = CursorGuard::new(&mut model);
+                    LOOP.with(|s| {
+                        *s.borrow_mut() = Some(Loop {
+                            model,
+                            commands,
+                            cursor,
+                        })
+                    });
                     let _ = tx.send(Ok(window.0 as usize));
                     let mut message = MSG::default();
                     while GetMessageW(&mut message, None, 0, 0).as_bool() {
                         let _ = TranslateMessage(&message);
                         DispatchMessageW(&message);
                     }
+                    LOOP.with(|s| {
+                        s.borrow_mut().take();
+                    });
                     let _ = WTSUnRegisterSessionNotification(window);
                     let _ = DestroyWindow(window);
                 }
@@ -332,4 +361,63 @@ pub fn start(
     Ok(Arc::new(move || unsafe {
         let _ = PostMessageW(HWND(hwnd as _), CONTROL, WPARAM(0), LPARAM(0));
     }))
+}
+
+// Unlike ShowCursor's per-thread counter, Magnification controls the desktop
+// cursor without replacing the user's cursor theme or taking input capture.
+struct CursorGuard {
+    initialized: bool,
+    hidden: bool,
+}
+impl CursorGuard {
+    fn new(model: &mut Model) -> Self {
+        model.state.cursor_visibility =
+            "Hides after edge departure; restores on physical input or arrival".into();
+        model.publish();
+        Self {
+            initialized: false,
+            hidden: false,
+        }
+    }
+    fn sync(&mut self, model: &mut Model) {
+        let hidden = model.cursor.hidden;
+        if hidden && !self.initialized {
+            self.initialized = unsafe { MagInitialize().as_bool() };
+            if !self.initialized {
+                model.cursor.restore();
+                model.state.cursor_visibility = "Windows cursor visibility API unavailable".into();
+                model.publish();
+                return;
+            }
+        }
+        if hidden != self.hidden {
+            if unsafe { MagShowSystemCursor(!hidden).as_bool() } {
+                self.hidden = hidden;
+                model.state.cursor_hidden = hidden;
+                if !hidden {
+                    unsafe {
+                        let _ = MagUninitialize();
+                    }
+                    self.initialized = false;
+                }
+                model.publish();
+            } else {
+                model.cursor.restore();
+                model.state.cursor_visibility = "Windows could not change cursor visibility".into();
+                model.publish();
+            }
+        }
+    }
+}
+impl Drop for CursorGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if self.hidden {
+                let _ = MagShowSystemCursor(true);
+            }
+            if self.initialized {
+                let _ = MagUninitialize();
+            }
+        }
+    }
 }

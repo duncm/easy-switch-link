@@ -75,6 +75,7 @@ impl Editor {
                 &follow.desktop.reason
             }
         ));
+        ui.small(&follow.desktop.cursor_visibility);
         if !follow.message.is_empty() {
             ui.label(&follow.message);
         }

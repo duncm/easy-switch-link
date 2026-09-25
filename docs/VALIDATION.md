@@ -238,3 +238,23 @@ setup. It is not a universal bound or a Linux performance measurement.
 
 No physical host switch was issued during development. Unsupported or unverified
 trigger behavior must not be represented as proven device compatibility.
+
+## 0.2.1 cursor visibility and About
+
+- Windows x64 and Linux amd64: 47 unit/simulation tests pass, including successful
+  HID-write notification, failed/expired/paused/stale/disconnected write rejection,
+  manual switches, late/duplicate hide suppression, local input restoration,
+  synthetic movement, arrival restoration and invalidated crossings.
+- Strict workspace Clippy passes on Windows and Linux (including the Wayland backend).
+- Native Windows Magnification API initialization, hide and restore calls returned
+  success in a bounded probe; this is not a visual hardware acceptance test.
+- Cursor visibility during actual Bolt handoffs, unknown/unlinked physical input,
+  crash recovery on Windows, and GNOME/KDE Wayland remain hardware-unverified for
+  this update. Wayland cursor hiding is unsupported through the standard portals.
+- All six 0.2.1 artifacts built. Windows executable version/help and MSI version
+  metadata checked; Linux package architecture/content/checksums checked, amd64
+  headless start/status/quit passed, and ARM64 executable version checked under QEMU.
+- About screen rendered under Xvfb and visually checked: version 0.2.1 and license
+  are visible, with no clipped text. These builds have not been installed on the
+  paired hardware; package upgrade and physical round-trip checks remain pending.
+- Prior 0.2.0 timing/resource measurements do not measure this update.

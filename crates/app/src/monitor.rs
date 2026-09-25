@@ -132,7 +132,7 @@ pub fn run(paths: Paths, headless: bool, diagnostics: bool) -> Result<()> {
     }
     // Do not block the coordinator while bounded worker event queues are draining.
     if let Some(follow) = &state.follow {
-        let _ = follow.send(crate::follow::Command::Stop);
+        follow.shutdown();
     }
     state.engine.paused = true;
     state.invalidate();
@@ -191,7 +191,7 @@ impl Monitor {
     fn update_follow(&mut self) {
         if !self.engine.config.follow.enabled {
             if let Some(follow) = self.follow.take() {
-                let _ = follow.send(crate::follow::Command::Stop);
+                follow.shutdown();
             }
             return;
         }
@@ -286,6 +286,19 @@ impl Monitor {
                 command,
                 epoch,
                 received_at: request.at,
+                departure: request.desktop.clone().filter(|_| primary).map(|desktop| {
+                    let crossing = request.at;
+                    Box::new(move |written| {
+                        if let Err(error) =
+                            desktop.send(easy_switch_platform::desktop::Command::Depart {
+                                crossing,
+                                written,
+                            })
+                        {
+                            tracing::warn!(%error, "Could not hide departed cursor");
+                        }
+                    }) as Box<dyn FnOnce(Instant) + Send + Sync>
+                }),
             }) {
                 if primary {
                     return Err(error);
@@ -512,6 +525,7 @@ impl Monitor {
                     command,
                     epoch,
                     received_at,
+                    departure: None,
                 }) {
                     self.message(format!("Switch not queued: {e:#}"));
                 }

@@ -27,6 +27,7 @@ pub struct Local {
     pub generation: u64,
 }
 pub struct Dispatch {
+    pub desktop: Option<desktop::Handle>,
     pub transaction: String,
     pub deadline: Instant,
     pub rule: Rule,
@@ -42,6 +43,7 @@ pub enum Command {
 }
 #[derive(Clone)]
 pub struct Manager {
+    finished: crossbeam_channel::Receiver<()>,
     tx: mpsc::Sender<Command>,
     status: Arc<Mutex<FollowStatus>>,
 }
@@ -49,6 +51,7 @@ impl Manager {
     pub fn start(paths: Paths, dispatch: crossbeam_channel::Sender<Dispatch>) -> Result<Self> {
         let (tx, rx) = mpsc::channel(64);
         let status = Arc::new(Mutex::new(FollowStatus::default()));
+        let (finished_tx, finished) = crossbeam_channel::bounded(1);
         let thread_status = status.clone();
         let thread_tx = tx.clone();
         std::thread::Builder::new()
@@ -63,13 +66,24 @@ impl Manager {
                 if let Err(e) = result {
                     thread_status.lock().unwrap().message = format!("Edge coordinator: {e:#}");
                 }
+                let _ = finished_tx.send(());
             })?;
-        Ok(Self { tx, status })
+        Ok(Self {
+            tx,
+            status,
+            finished,
+        })
     }
     pub fn send(&self, c: Command) -> Result<()> {
         self.tx
             .try_send(c)
             .map_err(|_| anyhow::anyhow!("Edge coordinator queue full or stopped"))
+    }
+    pub fn shutdown(&self) {
+        let _ = self.send(Command::Stop);
+        if self.finished.recv_timeout(Duration::from_secs(2)).is_err() {
+            tracing::warn!("Timed out waiting for desktop cleanup");
+        }
     }
     pub fn status(&self) -> FollowStatus {
         self.status.lock().unwrap().clone()
@@ -599,10 +613,12 @@ async fn run(
     if let Some(d) = discovery {
         let _ = d.shutdown();
     }
-    let s = shared.lock().unwrap();
-    if let Some(d) = &s.desktop {
+    let desktop = shared.lock().unwrap().desktop.clone();
+    if let Some(d) = desktop {
+        let _ = tokio::time::timeout(Duration::from_millis(500), d.restore()).await;
         let _ = d.send(desktop::Command::Stop);
     }
+    let s = shared.lock().unwrap();
     for p in s.peers.values() {
         let _ = p.tx.try_send(Wire::Bye);
     }
@@ -989,7 +1005,9 @@ async fn handoff(
                 Some(ready.saturating_duration_since(at).as_secs_f64() * 1000.0);
         }
         let (tx, rx) = oneshot::channel();
+        let desktop = shared.lock().unwrap().desktop.clone();
         dispatch.try_send(Dispatch {
+            desktop,
             transaction: transaction.clone(),
             deadline: ready + Duration::from_millis(100),
             rule: rule.clone(),

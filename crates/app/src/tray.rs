@@ -11,6 +11,7 @@ pub fn spawn(paths: Paths) -> Result<()> {
 
 fn action(paths: &Paths, action: &str) {
     let result = match action {
+        "about" => crate::cli::child(paths, &["about"]).map(|_| ()),
         "settings" | "switch" => crate::cli::spawn_settings(paths),
         "toggle" => ipc::call(paths, Request::Status).and_then(|reply| {
             ipc::call(
@@ -81,6 +82,7 @@ fn windows_tray(paths: Paths) -> Result<()> {
                     ("Pause / resume", "toggle"),
                     ("Toggle start at login", "startup"),
                     ("Diagnostics...", "diagnostics"),
+                    ("About...", "about"),
                     ("Quit", "quit"),
                 ];
                 let mut actions = std::collections::HashMap::new();
@@ -151,6 +153,7 @@ fn linux_tray(paths: Paths) -> Result<()> {
                 ("Pause / resume", "toggle"),
                 ("Toggle start at login", "startup"),
                 ("Diagnostics...", "diagnostics"),
+                ("About...", "about"),
                 ("Quit", "quit"),
             ]
             .into_iter()

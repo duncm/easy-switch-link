@@ -35,6 +35,8 @@ enum Action {
         diagnostics: bool,
     },
     Settings,
+    /// Show the application version and license.
+    About,
     Devices {
         #[arg(long)]
         json: bool,
@@ -123,6 +125,7 @@ pub fn main() -> Result<()> {
                 crate::monitor::run(paths, false, false)
             }
         }
+        Some(Action::About) => crate::ui::about(),
         Some(Action::Settings) => {
             ensure_running(&paths, false)?;
             crate::ui::run(paths)

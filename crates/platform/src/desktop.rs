@@ -32,6 +32,62 @@ pub enum Event {
 mod tests {
     use super::*;
     use easy_switch_core::follow::{Display, Edge};
+    #[test]
+    fn departure_requires_current_crossing_and_success_before_new_input() {
+        let at = Instant::now();
+        let written = at + Duration::from_millis(30);
+        let mut cursor = CursorVisibility::default();
+        cursor.depart(at, written, written);
+        assert!(!cursor.hidden, "Manual switches have no edge crossing");
+        cursor.crossing = Some(at);
+        cursor.depart(at, written, written);
+        assert!(cursor.hidden);
+        cursor.input(written + Duration::from_millis(1));
+        assert!(
+            !cursor.hidden,
+            "Unknown, unlinked and returning inputs restore"
+        );
+        cursor.depart(at, written, written + Duration::from_millis(2));
+        assert!(!cursor.hidden, "Duplicate completion cannot re-hide");
+        cursor.crossing = Some(at);
+        cursor.depart(at, written, written + Duration::from_millis(2));
+        assert!(
+            !cursor.hidden,
+            "Input already processed after the write wins"
+        );
+    }
+    #[test]
+    fn departure_is_invalidated_by_arrival_configuration_or_expiration() {
+        let at = Instant::now();
+        for case in 0..3 {
+            let mut cursor = CursorVisibility {
+                crossing: Some(at),
+                ..Default::default()
+            };
+            if case == 0 {
+                cursor.restore();
+            }
+            if case == 1 {
+                cursor.crossing = Some(at + Duration::from_millis(1));
+            }
+            let now = at + Duration::from_secs(if case == 2 { 2 } else { 0 });
+            cursor.depart(at, at, now);
+            assert!(!cursor.hidden);
+        }
+    }
+    #[test]
+    fn synthetic_motion_cannot_restore_departed_cursor_but_arrival_does() {
+        let (mut m, _, segment) = fixture();
+        m.cursor.hidden = true;
+        let p = m.state.pointer;
+        m.movement(p, Point::default(), false, true);
+        assert!(m.cursor.hidden);
+        m.placement(&segment, 0.5, m.state.generation).unwrap();
+        assert!(!m.cursor.hidden);
+        m.cursor.hidden = true;
+        m.input();
+        assert!(!m.cursor.hidden);
+    }
     fn fixture() -> (Model, crossbeam_channel::Receiver<Event>, Segment) {
         let (tx, rx) = crossbeam_channel::bounded(16);
         let mut model = Model::new("simulation", tx);
@@ -185,6 +241,12 @@ mod tests {
 mod session_watch;
 
 pub enum Command {
+    Restore(oneshot::Sender<()>),
+    /// Sent only after the primary mouse's edge-switch HID write succeeds.
+    Depart {
+        crossing: Instant,
+        written: Instant,
+    },
     Configure {
         enabled: bool,
         rules: Vec<Rule>,
@@ -217,6 +279,12 @@ impl Handle {
             .try_send(c)
             .map_err(|_| anyhow::anyhow!("Desktop command queue unavailable"))?;
         (self.wake)();
+        Ok(())
+    }
+    pub async fn restore(&self) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Command::Restore(tx))?;
+        rx.await?;
         Ok(())
     }
     pub async fn place(&self, segment: Segment, fraction: f64, generation: u64) -> Result<u64> {
@@ -256,6 +324,7 @@ struct Reservation {
     until: Instant,
 }
 pub(super) struct Model {
+    cursor: CursorVisibility,
     bindings: Option<Bindings>,
     pub state: DesktopState,
     pub enabled: bool,
@@ -270,9 +339,11 @@ pub(super) struct Model {
 impl Model {
     fn new(backend: &str, events: crossbeam_channel::Sender<Event>) -> Self {
         Self {
+            cursor: CursorVisibility::default(),
             bindings: None,
             state: DesktopState {
                 backend: backend.into(),
+                cursor_visibility: "Cursor hiding is unavailable on this desktop backend".into(),
                 ..Default::default()
             },
             enabled: false,
@@ -300,6 +371,7 @@ impl Model {
         Ok(())
     }
     fn topology(&mut self, mut displays: Vec<easy_switch_core::follow::Display>) {
+        self.cursor.restore();
         displays.sort_by(|a, b| a.id.cmp(&b.id));
         if !displays.iter().all(|d| d.valid()) || displays.windows(2).any(|d| d[0].id == d[1].id) {
             self.state.ready = false;
@@ -343,7 +415,7 @@ impl Model {
         if synthetic {
             return;
         }
-        self.state.input_serial = self.state.input_serial.wrapping_add(1);
+        self.input();
         if !self.enabled
             || !self.state.ready
             || self.state.locked
@@ -368,13 +440,15 @@ impl Model {
             })
             .collect();
         if let [(rule, d, fraction)] = hits.as_slice() {
+            let at = Instant::now();
+            self.cursor.crossing = Some(at);
             self.latch
                 .block((*d).clone(), rule.source.edge, Instant::now());
             let _ = self.events.try_send(Event::Cross {
                 rule: rule.id.clone(),
                 fraction: *fraction,
                 generation: self.state.generation,
-                at: Instant::now(),
+                at,
             });
         }
     }
@@ -400,6 +474,7 @@ impl Model {
             .find(|d| d.id == s.display)
             .ok_or_else(|| anyhow::anyhow!("Destination display missing"))?;
         let p = s.arrival(d, f)?;
+        self.cursor.restore();
         self.sequence = self.sequence.wrapping_add(1);
         self.reservation = Some(Reservation {
             id: self.sequence,
@@ -423,6 +498,42 @@ impl Model {
         if self.reservation.as_ref().is_some_and(|r| r.id == id) {
             self.reservation = None;
         }
+    }
+    fn input(&mut self) {
+        self.state.input_serial = self.state.input_serial.wrapping_add(1);
+        self.cursor.input(Instant::now());
+    }
+}
+
+/// Restoring on *all* physical input includes unknown/unlinked devices and a
+/// linked device returning manually. Receiver collections do not always expose
+/// enough identity to distinguish their paired devices; never guess or swallow input.
+#[derive(Default)]
+struct CursorVisibility {
+    crossing: Option<Instant>,
+    last_input: Option<Instant>,
+    hidden: bool,
+}
+impl CursorVisibility {
+    fn depart(&mut self, crossing: Instant, written: Instant, now: Instant) {
+        if self.crossing == Some(crossing)
+            && written >= crossing
+            && written <= now
+            && now.saturating_duration_since(crossing) < Duration::from_secs(1)
+            && self.last_input.is_none_or(|input| input <= written)
+        {
+            self.hidden = true;
+        }
+        // A duplicate completion must never hide a cursor restored by local input.
+        self.crossing = None;
+    }
+    fn input(&mut self, at: Instant) {
+        self.last_input = Some(at);
+        self.hidden = false;
+    }
+    fn restore(&mut self) {
+        self.crossing = None;
+        self.hidden = false;
     }
 }
 

@@ -34,6 +34,9 @@ pub fn start(
                     while let Some(command) = commands.recv().await {
                         match command {
                             Command::Stop => break,
+                            Command::Restore(reply) => {
+                                let _ = reply.send(());
+                            }
                             Command::Configure { enabled, rules } => {
                                 model.enabled = enabled;
                                 model.rules = rules;
@@ -237,6 +240,9 @@ async fn session(
     let result=async{loop{tokio::select!{
         command=commands.recv()=>{let Some(command)=command else{break};match command {
             Command::Stop=>{commands.close();break;},Command::Authorize=>{},
+            // Portals cannot hide a desktop cursor without capturing all input.
+            Command::Depart{..}=>{},
+            Command::Restore(reply)=>{let _=reply.send(());},
             Command::SessionLocked(locked)=>{model.session_locked=locked;model.state.locked=locked;model.reservation=None;model.publish();names=set_barriers(&input,&input_session,model).await?;},
             Command::Configure{enabled,rules}=>{model.enabled=enabled;model.rules=rules;model.reservation=None;names=set_barriers(&input,&input_session,model).await?;},
             Command::Place{segment,fraction,generation,reply,deadline}=>{ if reply.is_closed() || Instant::now()>=deadline { continue; }

@@ -35,6 +35,7 @@ pub fn run(paths: Paths) -> Result<()> {
 }
 
 struct Settings {
+    about_open: bool,
     edge_editor: crate::follow_ui::Editor,
     paths: Paths,
     status: Status,
@@ -65,6 +66,7 @@ impl Settings {
         });
         let _ = tx.try_send(Request::Status);
         Self {
+            about_open: false,
             edge_editor: Default::default(),
             paths,
             status: Status::default(),
@@ -113,6 +115,11 @@ impl Settings {
 }
 impl eframe::App for Settings {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::Window::new("About Easy-Switch Link")
+            .open(&mut self.about_open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, about_contents);
         self.update_replies();
         // Only the visible settings process refreshes status; the monitor never polls hardware.
         if !self.busy && self.last_refresh.elapsed() >= Duration::from_secs(2) {
@@ -126,6 +133,9 @@ impl eframe::App for Settings {
                     RichText::new("Easy-Switch Link").color(Color32::from_rgb(98, 222, 193)),
                 );
                 ui.label("One switch. Your devices follow.");
+                if ui.button("About").clicked() {
+                    self.about_open = true;
+                }
             });
             ui.horizontal(|ui| {
                 ui.label(if self.status.paused {
@@ -290,4 +300,45 @@ impl eframe::App for Settings {
             ui.add_space(12.);
         }); });
     }
+}
+
+fn about_contents(ui: &mut egui::Ui) {
+    ui.heading("Easy-Switch Link");
+    ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+    ui.label("Link your Logitech Easy-Switch devices across computers.");
+    ui.label("With optional Destination follows mouse.");
+    ui.separator();
+    ui.label(format!("License: {}", env!("CARGO_PKG_LICENSE")));
+}
+
+/// A separate short-lived UI, also available when the monitor is not running.
+pub fn about() -> Result<()> {
+    struct About;
+    impl eframe::App for About {
+        fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                about_contents(ui);
+                ui.add_space(12.0);
+                if ui.button("Close").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+        }
+    }
+    eframe::run_native(
+        "About Easy-Switch Link",
+        eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([460.0, 230.0])
+                .with_resizable(false)
+                .with_icon(egui::IconData {
+                    rgba: crate::tray::icon_rgba(),
+                    width: 32,
+                    height: 32,
+                }),
+            ..Default::default()
+        },
+        Box::new(|_| Ok(Box::new(About))),
+    )
+    .map_err(|e| anyhow::anyhow!("About window: {e}"))
 }

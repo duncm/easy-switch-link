@@ -47,6 +47,7 @@ pub enum Command {
         command: SwitchCommand,
         epoch: u64,
         received_at: Instant,
+        departure: Option<Box<dyn FnOnce(Instant) + Send + Sync>>,
     },
     Recover,
     Refresh,
@@ -64,6 +65,7 @@ pub struct PendingSwitch {
     command: SwitchCommand,
     epoch: u64,
     received_at: Instant,
+    departure: Option<Box<dyn FnOnce(Instant) + Send + Sync>>,
 }
 impl Drop for Worker {
     fn drop(&mut self) {
@@ -81,6 +83,7 @@ impl Worker {
             command,
             epoch,
             received_at,
+            departure,
         } = command
         {
             self.switches
@@ -88,6 +91,7 @@ impl Worker {
                     command,
                     epoch,
                     received_at,
+                    departure,
                 })
                 .context("Receiver switch queue is full or disconnected")?;
         } else {
@@ -306,11 +310,13 @@ impl Session {
                         command,
                         epoch,
                         received_at,
+                        departure,
                     } => {
                         self.dispatch_switch(PendingSwitch {
                             command,
                             epoch,
                             received_at,
+                            departure,
                         })?;
                     }
                 }
@@ -398,6 +404,7 @@ impl Session {
             command,
             epoch,
             received_at,
+            departure,
         } = pending;
         if epoch != self.active_epoch.load(Ordering::Acquire)
             || epoch != self.epoch
@@ -426,6 +433,9 @@ impl Session {
         let completed = Instant::now();
         match result {
             Ok(()) => {
+                if let Some(notify_departure) = departure {
+                    notify_departure(completed);
+                }
                 let dispatch_us =
                     completed.saturating_duration_since(received_at).as_micros() as u64;
                 tracing::info!(transaction=command.transaction.as_deref().unwrap_or("physical-key"), device = %name, target_channel = command.target + 1,
@@ -849,6 +859,37 @@ mod tests {
             },
             epoch: 1,
             received_at: Instant::now(),
+            departure: None,
+        }
+    }
+    #[test]
+    fn cursor_departure_is_notified_only_after_successful_current_hid_write() {
+        for case in 0..7 {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut s, _events) = session(dir.path(), vec![], case == 1);
+            s.devices.insert(2, device());
+            let mut pending = pending_switch();
+            let calls = Arc::new(AtomicU64::new(0));
+            let completed = calls.clone();
+            if case != 6 {
+                // Manual switches carry no cursor notification.
+                pending.departure = Some(Box::new(move |_| {
+                    completed.fetch_add(1, Ordering::Relaxed);
+                }));
+            }
+            match case {
+                2 => s.paused = true,
+                3 => pending.epoch += 1,
+                4 => pending.command.expires = Some(Instant::now()),
+                5 => s.devices.get_mut(&2).unwrap().online = false,
+                _ => {}
+            }
+            s.dispatch_switch(pending).unwrap();
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                u64::from(case == 0),
+                "case {case}"
+            );
         }
     }
     #[test]
@@ -947,12 +988,14 @@ mod tests {
             command,
             epoch,
             received_at,
+            departure,
         } = pending_switch();
         worker
             .send(Command::Switch {
                 command,
                 epoch,
                 received_at,
+                departure,
             })
             .unwrap();
         assert!(matches!(rx.try_recv(), Ok(Command::Refresh)));

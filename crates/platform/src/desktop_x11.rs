@@ -223,6 +223,8 @@ pub fn start(
                 )?
                 .check()?;
                 c.screensaver_select_input(root, 1u32.into())?;
+                model.state.cursor_visibility =
+                    "Hides after edge departure; restores on physical input or arrival".into();
                 model.state.ready = true;
                 model.state.locked = model.session_locked;
                 model.state.pointer = pointer(&c, root)?.0;
@@ -234,6 +236,14 @@ pub fn start(
                         match command {
                             Command::Stop => return Ok(()),
                             Command::Authorize => {}
+                            Command::Restore(reply) => {
+                                model.cursor.restore();
+                                sync_cursor(&c, root, &mut model)?;
+                                let _ = reply.send(());
+                            }
+                            Command::Depart { crossing, written } => {
+                                model.cursor.depart(crossing, written, Instant::now());
+                            }
                             Command::SessionLocked(locked) => {
                                 model.session_locked = locked;
                                 model.state.locked = locked || screensaver_locked;
@@ -242,6 +252,7 @@ pub fn start(
                                 barriers(&c, root, &model, &mut active)?;
                             }
                             Command::Configure { enabled, rules } => {
+                                model.cursor.restore();
                                 model.enabled = enabled;
                                 model.rules = rules;
                                 if !enabled {
@@ -286,6 +297,7 @@ pub fn start(
                             }
                             Command::Complete(id) => model.complete(id),
                         }
+                        sync_cursor(&c, root, &mut model)?;
                     }
                     while let Some(event) = c.poll_for_event()? {
                         match event {
@@ -323,11 +335,15 @@ pub fn start(
                                 }
                                 model.movement(p, delta, buttons, false);
                             }
-                            XEvent::XinputRawKeyPress(_)
-                            | XEvent::XinputRawKeyRelease(_)
-                            | XEvent::XinputRawButtonPress(_)
-                            | XEvent::XinputRawButtonRelease(_) => {
-                                model.state.input_serial = model.state.input_serial.wrapping_add(1);
+                            XEvent::XinputRawKeyPress(e) | XEvent::XinputRawKeyRelease(e) => {
+                                if e.response_type & 0x80 == 0 && !injected.contains(&e.sourceid) {
+                                    model.input();
+                                }
+                            }
+                            XEvent::XinputRawButtonPress(e) | XEvent::XinputRawButtonRelease(e) => {
+                                if e.response_type & 0x80 == 0 && !injected.contains(&e.sourceid) {
+                                    model.input();
+                                }
                             }
                             XEvent::XinputBarrierHit(e) => {
                                 let (p, buttons) = pointer(&c, root)?;
@@ -349,6 +365,7 @@ pub fn start(
                             }
                             _ => {}
                         }
+                        sync_cursor(&c, root, &mut model)?;
                     }
                     let mut fds = [
                         libc::pollfd {
@@ -386,4 +403,23 @@ pub fn start(
     Ok(Arc::new(move || {
         let _ = (&*write).write(&[1]);
     }))
+}
+
+fn sync_cursor(c: &RustConnection, root: Window, model: &mut Model) -> Result<()> {
+    if model.state.locked || !model.enabled || !model.state.ready {
+        model.cursor.restore();
+    }
+    let hidden = model.cursor.hidden;
+    if hidden != model.state.cursor_hidden {
+        if hidden {
+            c.xfixes_hide_cursor(root)?.check()?;
+        } else {
+            c.xfixes_show_cursor(root)?.check()?;
+        }
+        c.flush()?;
+        model.state.cursor_hidden = hidden;
+        model.publish();
+    }
+    // XFixes also releases this client's hide on disconnect, including a crash.
+    Ok(())
 }

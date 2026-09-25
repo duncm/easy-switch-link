@@ -119,3 +119,29 @@ for the result. Neither diagnostics nor logs include private keys. Handoff timin
 reports LAN preparation/queue timing separately from unverified radio arrival.
 
 See [validation](VALIDATION.md) for measured results and untested combinations.
+
+## Cursor visibility and About (0.2.1)
+
+On Windows and X11, an edge handoff hides the source cursor after the primary
+mouse's HID switch command has been written successfully. Manual Easy-Switch
+keys, tray/CLI switches and disconnections do not hide it. Queued, expired or
+failed writes do not hide it either; radio arrival remains unverified.
+
+The cursor reappears on destination placement or physical keyboard/mouse input.
+This includes unknown and unlinked input devices, plus a linked device returning
+manually. Input is never captured or discarded. Receiver input collections do
+not always identify individual paired devices, so restoration conservatively
+accepts all physical input. Input processed after the switch write wins over a
+late hide notification. Pause, disable, layout changes, lock/suspend and clean
+exit also restore the cursor. Known synthetic X11 input is ignored.
+
+Windows uses the system cursor visibility API without changing the cursor theme;
+X11 uses XFixes, which also releases the hide if the client disconnects.
+Wayland portals do not offer independent desktop cursor hiding or global input
+observation outside capture, so cursor hiding is unavailable there. Edge
+switching remains available. Settings and JSON desktop diagnostics report cursor
+visibility support and whether this instance has hidden the cursor.
+
+Open **About** from Settings or the tray, or run `easy-switch-link about`, to
+see the executable's version and license. The standalone About window works
+without starting the monitor.
