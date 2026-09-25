@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Easy-Switch Link
+Comment=Link Logitech Easy-Switch devices
+Exec=easy-switch-link
+Icon=easy-switch-link
+Terminal=false
+Categories=Utility;Settings;
+StartupNotify=false

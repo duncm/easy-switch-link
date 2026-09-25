@@ -1,0 +1,13 @@
+[Unit]
+Description=Easy-Switch Link receiver monitor
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/easy-switch-link run --headless
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=12
+
+[Install]
+WantedBy=default.target

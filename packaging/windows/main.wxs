@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Easy-Switch Link" Manufacturer="Duncan Maitland" Version="0.2.0" UpgradeCode="40CC718D-B86C-42D7-B1A3-7E1DB7477804" Scope="perUser">
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of Easy-Switch Link is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="AppIcon" SourceFile="$(var.ProjectDir)\assets\easy-switch-link.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="INSTALLFOLDER" Name="Easy-Switch Link">
+        <Component Id="Application" Guid="A546C680-E286-46DB-8206-393B26FE331D">
+          <File Id="ApplicationExe" Source="$(var.ExePath)" />
+          <File Id="EdgeGuide" Source="$(var.ProjectDir)\docs\DESTINATION-FOLLOWS-MOUSE.md" />
+          <File Id="ValidationGuide" Source="$(var.ProjectDir)\docs\VALIDATION.md" />
+          <RegistryValue Root="HKCU" Key="Software\EasySwitchLink" Name="Executable" Type="string" Value="[#ApplicationExe]" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="MenuFolder" Name="Easy-Switch Link">
+        <Component Id="StartMenu" Guid="05315950-2B58-451A-A7D9-E136ED49F47A">
+          <Shortcut Id="StartShortcut" Name="Easy-Switch Link" Target="[#ApplicationExe]" WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" />
+          <RemoveFolder Id="RemoveMenuFolder" On="uninstall" />
+          <RegistryValue Root="HKCU" Key="Software\EasySwitchLink" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="Main" Title="Easy-Switch Link" Level="1">
+      <ComponentRef Id="Application" />
+      <ComponentRef Id="StartMenu" />
+    </Feature>
+  </Package>
+</Wix>
