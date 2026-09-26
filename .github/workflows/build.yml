@@ -20,6 +20,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --workspace
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/test-gnome-companion.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build packages
         run: |
           dotnet tool install wix --version 6.0.2 --tool-path target/tools
@@ -28,11 +30,11 @@ jobs:
           ./scripts/build-windows.ps1
       - name: Portable smoke test
         run: |
-          & ./dist/easy-switch-link-0.2.3-windows-x64.exe --help | Out-String
+          & ./dist/easy-switch-link-0.3.0-windows-x64.exe --help | Out-String
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: MSI install and uninstall smoke test
         run: |
-          $msi = (Resolve-Path ./dist/easy-switch-link-0.2.3-windows-x64.msi).Path
+          $msi = (Resolve-Path ./dist/easy-switch-link-0.3.0-windows-x64.msi).Path
           $install = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", '/qn', '/norestart') -Wait -PassThru -WindowStyle Hidden
           if ($install.ExitCode -notin @(0,3010)) { throw "MSI install failed: $($install.ExitCode)" }
           & "$env:LOCALAPPDATA/Easy-Switch Link/easy-switch-link.exe" --version | Out-String
@@ -44,6 +46,7 @@ jobs:
           path: |
             dist/*.exe
             dist/*.msi
+            dist/*-gnome.shell-extension.zip
             dist/SHA256SUMS-windows.txt
   linux:
     strategy:
@@ -62,7 +65,7 @@ jobs:
       - name: Build dependencies
         run: |
           apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential curl ca-certificates git pkg-config libudev-dev libxkbcommon-dev libxkbcommon-x11-0 libegl1-mesa-dev libgl1-mesa-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxinerama-dev
+          DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential curl ca-certificates git python3 systemd pkg-config libudev-dev libxkbcommon-dev libxkbcommon-x11-0 libegl1-mesa-dev libgl1-mesa-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxinerama-dev
       - uses: actions/checkout@v4
       - name: Rust
         run: |
@@ -80,9 +83,9 @@ jobs:
           bash scripts/build-linux.sh '${{ matrix.target }}'
       - name: Package and portable smoke tests
         run: |
-          dist/easy-switch-link-0.2.3-linux-${{ matrix.arch }} --help
-          dpkg-deb --info dist/easy-switch-link_0.2.3_${{ matrix.arch }}.deb
-          apt-get install -y ./dist/easy-switch-link_0.2.3_${{ matrix.arch }}.deb
+          dist/easy-switch-link-0.3.0-linux-${{ matrix.arch }} --help
+          dpkg-deb --info dist/easy-switch-link_0.3.0_${{ matrix.arch }}.deb
+          apt-get install -y ./dist/easy-switch-link_0.3.0_${{ matrix.arch }}.deb
           easy-switch-link --version
           easy-switch-link --config-dir /tmp/esl-smoke run --headless &
           monitor=$!
@@ -95,6 +98,6 @@ jobs:
         with:
           name: linux-${{ matrix.arch }}
           path: |
-            dist/easy-switch-link-0.2.3-linux-${{ matrix.arch }}
+            dist/easy-switch-link-0.3.0-linux-${{ matrix.arch }}
             dist/*_${{ matrix.arch }}.deb
             dist/SHA256SUMS-linux-${{ matrix.arch }}.txt

@@ -1,0 +1,264 @@
+#!/usr/bin/python3
+"""Explicit root-only activation. No network commands or user-supplied executables."""
+import argparse
+import ast
+import json
+import os
+from pathlib import Path
+import pwd
+import stat
+import subprocess
+import tempfile
+import time
+
+POLICY = Path('/etc/easy-switch-link/policy.json')
+STATE = Path('/var/lib/easy-switch-link')
+RULE = Path('/etc/udev/rules.d/71-easy-switch-link-system.rules')
+GDM = Path('/etc/dconf/db/gdm.d/99-easy-switch-link')
+UUID = 'easy-switch-link@duncm.github.com'
+HARDWARE = 'easy-switch-link-hardware.service'
+PEER = 'easy-switch-link-peer.service'
+SECRETS = ('peer-identity.json', 'peer-trust.json')
+
+def run(*args, check=True, **kwargs):
+    return subprocess.run(args, check=check, **kwargs)
+
+def user_run(user, *args, check=True, **kwargs):
+    return run('/usr/sbin/runuser', '-u', user.pw_name, '--', '/usr/bin/env',
+               f'HOME={user.pw_dir}', f'XDG_RUNTIME_DIR=/run/user/{user.pw_uid}',
+               f'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{user.pw_uid}/bus',
+               *args, check=check, **kwargs)
+
+def atomic(path, data, uid=0, gid=0, mode=0o600):
+    if uid and pwd.getpwuid(uid).pw_name not in ('easy-switch-link', 'easy-switch-link-peer'):
+        # User-controlled parent paths must never be followed with root privileges.
+        code = '''import os,sys,tempfile
+from pathlib import Path
+p=Path(sys.argv[1]);p.parent.mkdir(parents=True,exist_ok=True)
+fd,t=tempfile.mkstemp(dir=p.parent)
+try:
+ os.fchmod(fd,int(sys.argv[2]))
+ with os.fdopen(fd,'wb') as f:f.write(sys.stdin.buffer.read());f.flush();os.fsync(f.fileno())
+ os.replace(t,p)
+finally:
+ if os.path.exists(t):os.unlink(t)
+'''
+        run('/usr/sbin/runuser', '-u', pwd.getpwuid(uid).pw_name, '--', '/usr/bin/python3', '-c', code, str(path), str(mode), input=data)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=path.parent)
+    try:
+        os.fchown(fd, uid, gid)
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+
+def read_owned(path, uid):
+    if os.geteuid() == 0 and uid != 0:
+        # Check traversal permissions as the file owner, not as root. O_NOFOLLOW
+        # alone does not protect against user-controlled parent symlinks.
+        code = '''import os,stat,sys
+try:fd=os.open(sys.argv[1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+except FileNotFoundError:sys.exit(44)
+with os.fdopen(fd,'rb') as f:
+ s=os.fstat(f.fileno())
+ if not stat.S_ISREG(s.st_mode) or s.st_uid!=int(sys.argv[2]) or s.st_size>4194304:sys.exit(45)
+ data=f.read(4194305)
+ if len(data)>4194304:sys.exit(45)
+ sys.stdout.buffer.write(data)
+'''
+        result = run('/usr/sbin/runuser', '-u', pwd.getpwuid(uid).pw_name, '--', '/usr/bin/python3', '-c', code, str(path), str(uid), check=False, capture_output=True)
+        if result.returncode == 44: return None
+        if result.returncode != 0: raise RuntimeError(f'Cannot safely read state file: {path}')
+        return result.stdout
+    try: fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError: return None
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_size > 4 * 1024 * 1024:
+            raise RuntimeError(f'Unsafe state file: {path}')
+        if uid == 0 and info.st_mode & 0o022: raise RuntimeError(f'Root state is writable by another account: {path}')
+        data = stream.read(4 * 1024 * 1024 + 1)
+        if len(data) > 4 * 1024 * 1024: raise RuntimeError(f'State file grew beyond limit: {path}')
+        return data
+
+def restore_files(files, owner_uid):
+    for path, entry in files.items():
+        path = Path(path)
+        if entry is None:
+            if path in (RULE, GDM, Path('/etc/dconf/profile/gdm')): path.unlink(missing_ok=True)
+            else: user_run(pwd.getpwuid(owner_uid), '/usr/bin/rm', '-f', '--', str(path))
+        else: atomic(path, bytes.fromhex(entry['data']), entry['uid'], entry['gid'], entry['mode'])
+
+def snapshot(path, expected_uid=0):
+    if not path.exists(): return None
+    s = path.lstat()
+    if not stat.S_ISREG(s.st_mode) or s.st_uid != expected_uid: raise RuntimeError(f'Unsafe backup file ownership: {path}')
+    data = read_owned(path, expected_uid)
+    if data is None: raise RuntimeError(f'Backup file disappeared: {path}')
+    return dict(data=data.hex(), uid=s.st_uid, gid=s.st_gid, mode=stat.S_IMODE(s.st_mode))
+
+def reload_rules():
+    run('udevadm', 'control', '--reload-rules')
+    run('udevadm', 'trigger', '--subsystem-match=hidraw')
+    run('udevadm', 'trigger', '--subsystem-match=input')
+    run('systemctl', 'daemon-reload')
+
+def enable(args):
+    if POLICY.exists(): raise RuntimeError('System mode is already enabled; disable it before changing its owner or login policy')
+    user = pwd.getpwnam(args.user)
+    if user.pw_uid == 0: raise RuntimeError('The designated user must not be root')
+    run('systemd-sysusers', '/usr/lib/sysusers.d/easy-switch-link.conf')
+    hardware = pwd.getpwnam('easy-switch-link')
+    peer = pwd.getpwnam('easy-switch-link-peer')
+    if len({user.pw_uid, hardware.pw_uid, peer.pw_uid, 0}) != 4:
+        raise RuntimeError('Owner and service identities must be distinct and non-root')
+    for account in (hardware, peer):
+        if account.pw_shell not in ('/usr/sbin/nologin', '/sbin/nologin', '/bin/false', '/usr/bin/false'):
+            raise RuntimeError(f'{account.pw_name} must be a dedicated non-login account')
+    greeter = None
+    if args.login_handoffs:
+        for name in ('Debian-gdm', 'gdm'):
+            try: greeter = pwd.getpwnam(name); break
+            except KeyError: pass
+        if greeter is None: raise RuntimeError('GDM is required for login-screen handoffs')
+        version = run('gnome-shell', '--version', capture_output=True, text=True).stdout
+        if not any(f' {v}.' in version for v in range(45, 52)):
+            raise RuntimeError('This package supports GNOME 45–51; version validation remains enabled')
+    source = Path(user.pw_dir) / '.config/easy-switch-link'
+    config = read_owned(source / 'config.toml', user.pw_uid)
+    if config is None: raise RuntimeError('Save a working user configuration before enabling system mode')
+    autostart = Path(user.pw_dir) / '.config/autostart/easy-switch-link-system.desktop'
+    marker = source / 'gnome-companion.enabled'
+    profile = Path('/etc/dconf/profile/gdm')
+    old_autostart = Path(user.pw_dir) / '.config/autostart/easy-switch-link.desktop'
+    backups = {str(p): snapshot(p, user.pw_uid if p in (autostart, old_autostart, marker) else 0)
+               for p in (RULE, GDM, profile, autostart, old_autostart, marker)}
+    backup = STATE / 'activation-backup.json'
+    STATE.mkdir(parents=True, exist_ok=True, mode=0o755)
+    os.chown(STATE, 0, 0)
+    os.chmod(STATE, 0o755)
+    POLICY.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    os.chown(POLICY.parent, 0, 0)
+    os.chmod(POLICY.parent, 0o755)
+    atomic(backup, json.dumps({'uid': user.pw_uid, 'files': backups}).encode())
+    was_enabled = user_run(user, 'systemctl', '--user', 'is-enabled', 'easy-switch-link.service', check=False, capture_output=True).returncode == 0
+    extension_state = None
+    if args.login_handoffs:
+        result = user_run(user, 'gnome-extensions', 'list', '--enabled', check=False, capture_output=True, text=True)
+        if result.returncode == 0: extension_state = UUID in result.stdout.splitlines()
+    original_secrets = {}
+    try:
+        # Quit first; the old monitor restores temporary HID reporting before exit.
+        user_run(user, '/usr/bin/easy-switch-link', 'quit', check=False, capture_output=True)
+        user_run(user, 'systemctl', '--user', 'disable', '--now', 'easy-switch-link.service', check=False)
+        import fcntl
+        lock_path = source / 'monitor.lock'
+        if not lock_path.exists(): atomic(lock_path, b'', user.pw_uid, user.pw_gid)
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(lock_fd, 'r+') as lock:
+            lock_info = os.fstat(lock.fileno())
+            if lock_info.st_uid != user.pw_uid or not stat.S_ISREG(lock_info.st_mode):
+                raise RuntimeError('Unsafe monitor lock file')
+            until = time.monotonic() + 12
+            while True:
+                try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+                except BlockingIOError:
+                    if time.monotonic() >= until: raise RuntimeError('Existing monitor did not stop')
+                    time.sleep(0.1)
+            for account, directory, names in (
+                (hardware, STATE / 'hardware', ('config.toml', 'device-cache.json', 'recovery.json')),
+                (peer, STATE / 'peer', SECRETS if args.login_handoffs else ())):
+                directory.mkdir(mode=0o700, exist_ok=True)
+                os.chown(directory, account.pw_uid, account.pw_gid)
+                os.chmod(directory, 0o700)
+                for name in names:
+                    data = read_owned(source / name, user.pw_uid)
+                    if account.pw_name == 'easy-switch-link-peer': original_secrets[name] = data
+                    if data is not None: atomic(directory / name, data, account.pw_uid, account.pw_gid)
+                    else: (directory / name).unlink(missing_ok=True)
+            rules = '# Explicitly enabled Easy-Switch Link system mode.\n'
+            for pid in ('c548', 'c52b', 'c532'):
+                rules += f'SUBSYSTEM=="hidraw", ATTRS{{idVendor}}=="046d", ATTRS{{idProduct}}=="{pid}", GROUP="easy-switch-link", MODE="0660"\n'
+                rules += f'SUBSYSTEM=="input", KERNEL=="event*", ATTRS{{idVendor}}=="046d", ATTRS{{idProduct}}=="{pid}", GROUP="easy-switch-link", MODE="0640"\n'
+            atomic(RULE, rules.encode(), mode=0o644)
+            if args.login_handoffs:
+                if not profile.exists(): atomic(profile, b'user-db:user\nsystem-db:gdm\nfile-db:/usr/share/gdm/greeter-dconf-defaults\n', mode=0o644)
+                elif 'system-db:gdm' not in profile.read_text(): raise RuntimeError('Custom GDM dconf profile has no gdm database; leave it unchanged and configure it explicitly')
+                current = user_run(greeter, 'env', 'DCONF_PROFILE=gdm', 'dconf', 'read', '/org/gnome/shell/enabled-extensions', check=False, capture_output=True, text=True).stdout.strip()
+                extensions = ast.literal_eval(current.removeprefix('@as ')) if current else []
+                if UUID not in extensions: extensions.append(UUID)
+                atomic(GDM, ("[org/gnome/shell]\nenabled-extensions=" + repr(extensions) + "\ndisable-user-extensions=false\n").encode(), mode=0o644)
+                run('dconf', 'update')
+                atomic(marker, b'1\n', user.pw_uid, user.pw_gid)
+            policy = dict(version=1, owner_uid=user.pw_uid, receiver_uid=hardware.pw_uid,
+                          peer_uid=peer.pw_uid, greeter_uid=greeter.pw_uid if greeter else 0,
+                          seat='seat0', login_handoffs=args.login_handoffs)
+            atomic(POLICY, json.dumps(policy).encode(), mode=0o644)
+            atomic(autostart, b'[Desktop Entry]\nType=Application\nName=Easy-Switch Link session companion\nExec=/usr/bin/easy-switch-link run\nX-GNOME-Autostart-enabled=true\n', user.pw_uid, user.pw_gid, 0o644)
+            user_run(user, '/usr/bin/rm', '-f', '--', str(old_autostart))
+            reload_rules()
+            run('systemctl', 'enable', '--now', HARDWARE)
+            if args.login_handoffs: run('systemctl', 'enable', '--now', PEER)
+            time.sleep(1)
+            run('systemctl', 'is-active', '--quiet', HARDWARE)
+            if args.login_handoffs: run('systemctl', 'is-active', '--quiet', PEER)
+        if args.login_handoffs:
+            for name in SECRETS: user_run(user, '/usr/bin/rm', '-f', '--', str(source/name))
+            user_run(user, 'gnome-extensions', 'enable', UUID, check=False)
+        atomic(STATE / 'previous-user-service.json', json.dumps({'enabled': was_enabled, 'extension_enabled': extension_state}).encode())
+        print('System service enabled. Start Easy-Switch Link in your session. Log out/in to load a newly installed GNOME companion; the next GDM session loads its configuration.')
+    except Exception:
+        run('systemctl', 'disable', '--now', PEER, HARDWARE, check=False)
+        POLICY.unlink(missing_ok=True)
+        restore_files(backups, user.pw_uid)
+        for name, data in original_secrets.items():
+            if data is not None: atomic(source/name, data, user.pw_uid, user.pw_gid)
+        reload_rules()
+        if args.login_handoffs: run('dconf', 'update', check=False)
+        if was_enabled: user_run(user, 'systemctl', '--user', 'enable', '--now', 'easy-switch-link.service', check=False)
+        raise
+
+def disable():
+    p = json.loads(read_owned(POLICY, 0))
+    backup = json.loads(read_owned(STATE/'activation-backup.json', 0))
+    if p['version'] != 1 or not p['owner_uid'] or backup['uid'] != p['owner_uid']:
+        raise RuntimeError('Activation backup and protected policy do not match')
+    if p['receiver_uid'] != pwd.getpwnam('easy-switch-link').pw_uid or p['peer_uid'] != pwd.getpwnam('easy-switch-link-peer').pw_uid:
+        raise RuntimeError('Service account identities changed')
+    user = pwd.getpwuid(p['owner_uid'])
+    run('systemctl', 'disable', '--now', PEER, HARDWARE, check=False)
+    source = Path(user.pw_dir) / '.config/easy-switch-link'
+    for folder, uid, names in ((STATE/'hardware', p['receiver_uid'], ('config.toml','device-cache.json','recovery.json')),
+                               (STATE/'peer', p['peer_uid'], SECRETS if p['login_handoffs'] else ())):
+        for name in names:
+            data = read_owned(folder/name, uid)
+            if data is not None: atomic(source/name, data, user.pw_uid, user.pw_gid)
+    restore_files(backup['files'], user.pw_uid)
+    POLICY.unlink()
+    reload_rules()
+    if p['login_handoffs']: run('dconf', 'update')
+    previous = json.loads(read_owned(STATE/'previous-user-service.json', 0))
+    if previous.get('extension_enabled') is False:
+        user_run(user, 'gnome-extensions', 'disable', UUID, check=False)
+    if previous['enabled']: user_run(user, 'systemctl','--user','enable','--now','easy-switch-link.service',check=False)
+    print('System mode disabled. User configuration and pairing state restored. Restart the session monitor.')
+
+def main():
+    if os.geteuid() != 0: raise SystemExit('This installation helper requires root')
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest='action', required=True)
+    enable_parser = sub.add_parser('enable')
+    enable_parser.add_argument('--user', required=True)
+    enable_parser.add_argument('--login-handoffs', action='store_true')
+    sub.add_parser('disable')
+    args = parser.parse_args()
+    if args.action == 'enable': enable(args)
+    else: disable()
+
+if __name__ == '__main__': main()

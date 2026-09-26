@@ -1,0 +1,35 @@
+[Unit]
+Description=Easy-Switch Link machine peer coordinator
+After=easy-switch-link-hardware.service network.target
+Requires=easy-switch-link-hardware.service
+ConditionPathExists=/etc/easy-switch-link/policy.json
+
+[Service]
+User=easy-switch-link-peer
+Group=easy-switch-link-peer
+ExecStart=/usr/bin/easy-switch-link service peer
+RuntimeDirectory=easy-switch-link/peer
+RuntimeDirectoryMode=0755
+StateDirectory=easy-switch-link/peer
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=8
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+SystemCallFilter=~@mount @debug @raw-io @reboot @swap
+
+[Install]
+WantedBy=multi-user.target

@@ -36,6 +36,8 @@ pub struct Dispatch {
     pub reply: oneshot::Sender<Result<(), String>>,
 }
 pub enum Command {
+    #[cfg(target_os = "linux")]
+    RestoreCursor,
     Update(Local),
     Desktop(desktop::Event),
     Action(Action),
@@ -224,7 +226,7 @@ impl Shared {
             desktop: DesktopState {
                 reason: if self.local.paused {
                     "Monitoring paused".into()
-                } else if self.desktop_state.locked {
+                } else if self.desktop_state.locked && !self.desktop_state.lock_handoffs {
                     "User session locked or inactive".into()
                 } else {
                     self.desktop_state.reason.clone()
@@ -238,7 +240,7 @@ impl Shared {
                 && !self.local.paused
                 && self.desktop_state.ready
                 && !self.desktop_state.displays.is_empty()
-                && !self.desktop_state.locked,
+                && self.desktop_state.available(),
         }
     }
     fn publish(&self) {
@@ -317,6 +319,18 @@ impl Shared {
                 (r.id.clone(), reason.into())
             })
             .collect();
+        #[cfg(target_os = "linux")]
+        if easy_switch_platform::system::policy()
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            let _ = self
+                .monitor_events
+                .try_send(crate::receiver::Event::CoordinatorStatus(Box::new(
+                    s.clone(),
+                )));
+        }
     }
     fn message(&self, text: impl Into<String>) {
         let text = text.into();
@@ -406,6 +420,15 @@ async fn run(
     let mut port = 0;
     while let Some(command) = commands.recv().await {
         match command {
+            #[cfg(target_os = "linux")]
+            Command::RestoreCursor => {
+                let mut s = shared.lock().unwrap();
+                s.pending.clear();
+                if let Some(d) = &s.desktop {
+                    let (reply, _) = oneshot::channel();
+                    let _ = d.send(desktop::Command::Restore(reply));
+                }
+            }
             Command::Stop => break,
             Command::Update(local) => {
                 let enabled = local.config.follow.enabled;
@@ -525,15 +548,19 @@ async fn run(
             Command::Desktop(event) => match event {
                 desktop::Event::State(snapshot) => {
                     let mut s = shared.lock().unwrap();
-                    if snapshot.locked
+                    if snapshot.locked || snapshot.session_kind == "greeter" {
+                        s.gate.lock().unwrap().pairing_until = None;
+                        s.peers.retain(|_, p| p.status.trusted);
+                    }
+                    if !snapshot.available()
                         || !snapshot.ready
                         || snapshot.generation != s.desktop_state.generation
                     {
                         s.pending.clear();
                     }
                     s.desktop_state = snapshot;
-                    s.refresh_layouts();
                     s.publish();
+                    s.refresh_layouts();
                     s.broadcast();
                 }
                 desktop::Event::Cross {
@@ -927,7 +954,14 @@ if let Some((_,token,_))=reservation.take()&& let Some(d)=&shared.lock().unwrap(
                     Wire::Prepare{id:transaction,destination,fraction,layout,config_generation,computer,group,mouse}=>{
                         ensure!(transaction.len()==32 && seen.len()<256 && seen.insert(transaction.clone()),"Replayed handoff or session transaction limit reached");
                         let preparation=(||->Result<desktop::Handle>{let s=shared.lock().unwrap();ensure!(s.snapshot().ready && s.local.generation==config_generation && s.local.config.follow.local_computer==computer,"Destination not ready or configuration changed");ensure!(reservation.is_none(),"Destination busy");ensure!(s.local.config.groups.iter().any(|g|g.id==group && g.devices.iter().any(|m|m.id==mouse && m.channels.contains_key(&computer))),"Destination group/mouse mapping not enrolled");s.desktop.clone().context("No desktop capability")})();
-                        let placed=match preparation {Ok(d)=>match tokio::time::timeout(Duration::from_millis(400),d.place(destination,fraction,layout)).await {Ok(result)=>result.map_err(|e|e.to_string()),Err(_)=>Err("Cursor placement timed out".into())},Err(e)=>Err(e.to_string())};
+                        let placed=match preparation {Ok(d)=>{
+                            #[cfg(target_os = "linux")]
+                            if easy_switch_platform::system::policy()?.is_some(){
+                                let(tx,rx)=oneshot::channel();shared.lock().unwrap().monitor_events.try_send(crate::receiver::Event::Supersede(tx))?;
+                                tokio::time::timeout(Duration::from_millis(80),rx).await.context("Receiver supersession timed out")??.map_err(anyhow::Error::msg)?;
+                            }
+                            match tokio::time::timeout(Duration::from_millis(400),d.place(destination,fraction,layout)).await {Ok(result)=>result.map_err(|e|e.to_string()),Err(_)=>Err("Cursor placement timed out".into())}
+                        },Err(e)=>Err(e.to_string())};
                         if let Ok(token)=placed{reservation=Some((transaction.clone(),token,Instant::now()+Duration::from_secs(5)));}
                         write_wire(&mut writer,&Wire::Prepared{id:transaction,result:placed}).await?;
                     },

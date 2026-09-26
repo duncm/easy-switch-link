@@ -67,7 +67,7 @@ impl Editor {
         ui.label(format!(
             "{}: {}",
             follow.desktop.backend,
-            if follow.desktop.locked {
+            if follow.desktop.locked && !follow.desktop.lock_handoffs {
                 "Locked or inactive session"
             } else if follow.desktop.ready {
                 "Ready"
@@ -76,6 +76,12 @@ impl Editor {
             }
         ));
         ui.small(&follow.desktop.cursor_visibility);
+        if !follow.desktop.session_kind.is_empty() {
+            ui.small(format!(
+                "Desktop controller: {} ({})",
+                follow.desktop.session_kind, follow.desktop.session
+            ));
+        }
         if !follow.message.is_empty() {
             ui.label(&follow.message);
         }

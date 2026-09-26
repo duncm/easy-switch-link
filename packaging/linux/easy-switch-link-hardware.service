@@ -1,0 +1,34 @@
+[Unit]
+Description=Easy-Switch Link system receiver owner
+After=systemd-udevd.service systemd-logind.service
+ConditionPathExists=/etc/easy-switch-link/policy.json
+
+[Service]
+User=easy-switch-link
+Group=easy-switch-link
+ExecStart=/usr/bin/easy-switch-link service hardware
+RuntimeDirectory=easy-switch-link/hardware
+RuntimeDirectoryMode=0755
+StateDirectory=easy-switch-link/hardware
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=12
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+LockPersonality=yes
+# udev/DAC grants only receiver nodes, including dynamically assigned hidraw majors.
+SystemCallFilter=~@mount @debug @raw-io @reboot @swap
+
+[Install]
+WantedBy=multi-user.target

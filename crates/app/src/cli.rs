@@ -22,6 +22,12 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Optional Linux system service and GNOME companion management.
+    #[cfg(target_os = "linux")]
+    Service {
+        #[command(subcommand)]
+        command: ServiceAction,
+    },
     /// Displays, peers, edge rules and pairing diagnostics.
     Edges {
         #[command(subcommand)]
@@ -70,6 +76,29 @@ enum Action {
         path: PathBuf,
     },
 }
+#[cfg(target_os = "linux")]
+#[derive(Subcommand)]
+enum ServiceAction {
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    Enable {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        login_handoffs: bool,
+    },
+    Disable,
+    Companion {
+        #[arg(value_parser=["enable","disable","status"])]
+        action: String,
+    },
+    #[command(hide = true)]
+    Hardware,
+    #[command(hide = true)]
+    Peer,
+}
 
 #[derive(Subcommand)]
 enum EdgeAction {
@@ -112,6 +141,14 @@ enum EdgeAction {
 }
 pub fn main() -> Result<()> {
     let args = Args::parse();
+    #[cfg(target_os = "linux")]
+    if let Some(Action::Service { command }) = &args.command {
+        ensure!(
+            args.config_dir.is_none(),
+            "Service management uses fixed protected paths; omit --config-dir"
+        );
+        return service_action(command);
+    }
     let paths = Paths::new(args.config_dir)?;
     match args.command {
         Some(Action::Run {
@@ -131,6 +168,16 @@ pub fn main() -> Result<()> {
             crate::ui::run(paths)
         }
         Some(Action::Export { path }) => {
+            #[cfg(target_os = "linux")]
+            let config = if easy_switch_platform::system::policy()?.is_some() {
+                crate::service::hardware(Request::Status)?
+                    .status
+                    .context("No service configuration")?
+                    .config
+            } else {
+                paths.load()?
+            };
+            #[cfg(not(target_os = "linux"))]
             let config = paths.load()?;
             crate::storage::atomic_write(
                 &absolute(path)?,
@@ -292,6 +339,125 @@ pub fn main() -> Result<()> {
                 }
             }
             ensure!(reply.ok, "{}", reply.message);
+            Ok(())
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn service_action(action: &ServiceAction) -> Result<()> {
+    if matches!(action, ServiceAction::Hardware | ServiceAction::Peer) {
+        let p = easy_switch_platform::system::policy()?.context("System service is not enabled")?;
+        let expected = if matches!(action, ServiceAction::Hardware) {
+            p.receiver_uid
+        } else {
+            p.peer_uid
+        };
+        ensure!(
+            unsafe { libc::geteuid() } == expected,
+            "This role must run under its dedicated service account"
+        );
+    }
+    match action {
+        ServiceAction::Hardware => crate::monitor::run_system(Paths::new(Some(
+            "/var/lib/easy-switch-link/hardware".into(),
+        ))?),
+        ServiceAction::Peer => crate::service::run_client(
+            Paths::new(Some("/var/lib/easy-switch-link/peer".into()))?,
+            true,
+            true,
+        ),
+        ServiceAction::Status { json } => {
+            let p = easy_switch_platform::system::policy()?;
+            if *json {
+                let response = if p.is_some() {
+                    crate::service::hardware(Request::Status).map_err(|e| e.to_string())
+                } else {
+                    Err("System mode is disabled".into())
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"policy":p,"service":response.as_ref().ok(),"error":response.as_ref().err()})
+                    )?
+                );
+            } else if let Some(p) = p {
+                println!(
+                    "System mode: owner UID {}, seat {}, login/lock handoffs {}",
+                    p.owner_uid, p.seat, p.login_handoffs
+                );
+                let response = crate::service::hardware(Request::Status)?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                println!("User-only mode; system service disabled");
+            }
+            Ok(())
+        }
+        ServiceAction::Enable {
+            user,
+            login_handoffs,
+        } => {
+            ensure!(
+                unsafe { libc::geteuid() } == 0,
+                "Run sudo easy-switch-link service enable --user {user}{}",
+                if *login_handoffs {
+                    " --login-handoffs"
+                } else {
+                    ""
+                }
+            );
+            let mut command = Command::new("/usr/lib/easy-switch-link/service-admin");
+            command.arg("enable").arg("--user").arg(user);
+            if *login_handoffs {
+                command.arg("--login-handoffs");
+            }
+            ensure!(
+                command.status()?.success(),
+                "System-service activation failed"
+            );
+            Ok(())
+        }
+        ServiceAction::Disable => {
+            ensure!(
+                unsafe { libc::geteuid() } == 0,
+                "Run sudo easy-switch-link service disable"
+            );
+            ensure!(
+                Command::new("/usr/lib/easy-switch-link/service-admin")
+                    .arg("disable")
+                    .status()?
+                    .success(),
+                "Service deactivation failed"
+            );
+            Ok(())
+        }
+        ServiceAction::Companion { action } => {
+            ensure!(
+                unsafe { libc::geteuid() } != 0,
+                "Enable the companion as your desktop user"
+            );
+            let p = Paths::new(None)?;
+            let marker = p.root.join("gnome-companion.enabled");
+            let uuid = "easy-switch-link@duncm.github.com";
+            if action == "status" {
+                let _ = Command::new("gnome-extensions")
+                    .args(["info", uuid])
+                    .status()?;
+                return Ok(());
+            }
+            ensure!(
+                Command::new("gnome-extensions")
+                    .args([action, uuid])
+                    .status()?
+                    .success(),
+                "GNOME companion action failed; log out/in after installing the extension"
+            );
+            if action == "enable" {
+                crate::storage::atomic_write(&marker, b"1\n")?;
+            } else if marker.exists() {
+                std::fs::remove_file(marker)?;
+            }
+            println!("Companion {action}d; restart the session monitor to apply backend selection");
             Ok(())
         }
     }

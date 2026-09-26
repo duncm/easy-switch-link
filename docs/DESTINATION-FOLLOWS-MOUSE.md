@@ -45,7 +45,8 @@ reverses, buttons are held, a control command arrives, or after 200 ms. It does
 not synthesize a push from an edge-activation notification. This timeout bounds
 capture; it is not a dwell requirement or an added delay once enough motion arrives.
 
-An unavailable, paused or locked peer, stale display binding, permission denial,
+An unavailable, paused or locked peer (unless explicitly enabled through the
+0.3.0 GNOME system-service option), stale display binding, permission denial,
 or missed readiness deadline leaves the devices on the source computer. The
 destination has at most 500 ms to acknowledge cursor placement. Commands enter
 the existing priority HID queues with a 100 ms expiry; the primary mouse is queued
@@ -155,7 +156,9 @@ exit also restore the cursor. Known synthetic X11 input is ignored.
 Windows uses the system cursor visibility API without changing the cursor theme;
 X11 uses XFixes, which also releases the hide if the client disconnects.
 Wayland portals do not offer independent desktop cursor hiding or global input
-observation outside capture, so cursor hiding is unavailable there. Edge
+observation outside capture, so cursor hiding is unavailable in the portal-only
+backend. The optional 0.3.0 GNOME companion provides a compositor-backed path;
+see [Linux system operation](SYSTEM-SERVICE.md). Edge
 switching remains available. Settings and JSON desktop diagnostics report cursor
 visibility support and whether this instance has hidden the cursor.
 
@@ -187,7 +190,8 @@ contents are retained. HID++ control notifications also cancel that device's
 recovery, including Easy-Switch keys that bypass ordinary OS keyboard events.
 New edge/manual switches, incoming handoffs, pause,
 configuration changes, session lock, receiver removal, and destination loss cancel
-superseded recovery. On Wayland the standard portal cannot prove keyboard inactivity
+superseded recovery. In user-only Wayland mode the standard portal cannot prove keyboard inactivity
 outside capture, so automatic retries are disabled there rather than moving a
-device that may have been used locally. Recovery is bounded and cannot guarantee
+device that may have been used locally. Version 0.3.0 system mode supplies passive
+receiver input observation for guarded Wayland retries. Recovery is bounded and cannot guarantee
 radio arrival for an unreachable device.

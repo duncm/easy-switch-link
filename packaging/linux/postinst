@@ -1,5 +1,14 @@
 #!/bin/sh
 set -e
+if command -v systemd-sysusers >/dev/null 2>&1; then
+    systemd-sysusers /usr/lib/sysusers.d/easy-switch-link.conf
+fi
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    if [ -f /etc/easy-switch-link/policy.json ]; then
+        systemctl try-restart easy-switch-link-hardware.service easy-switch-link-peer.service
+    fi
+fi
 if command -v udevadm >/dev/null 2>&1; then
     udevadm control --reload-rules || true
     udevadm trigger --subsystem-match=hidraw || true

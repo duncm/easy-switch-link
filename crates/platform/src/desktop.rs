@@ -7,6 +7,9 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+#[cfg(target_os = "linux")]
+#[path = "desktop_gnome.rs"]
+mod gnome;
 #[cfg(windows)]
 #[path = "desktop_windows.rs"]
 mod native;
@@ -441,14 +444,25 @@ pub fn start(
     #[cfg(windows)]
     let wake = native::start(rx, events, _private_dir, activity.clone())?;
     #[cfg(target_os = "linux")]
-    let wake = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+    let use_gnome = {
+        let p = crate::system::policy()?;
+        p.as_ref()
+            .is_some_and(|p| p.login_handoffs && unsafe { libc::geteuid() } == p.peer_uid)
+            || _private_dir.join("gnome-companion.enabled").exists()
+    };
+    #[cfg(target_os = "linux")]
+    let wake = if use_gnome {
+        gnome::start(rx, events, _private_dir, activity.clone(), tx.clone())?
+    } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         wayland::start(rx, events, _private_dir, activity.clone())?
     } else {
         x11::start(rx, events, _private_dir, activity.clone())?
     };
     let handle = Handle { tx, wake, activity };
     #[cfg(target_os = "linux")]
-    session_watch::start(handle.clone());
+    if !use_gnome {
+        session_watch::start(handle.clone());
+    }
     Ok(handle)
 }
 struct Reservation {
@@ -473,7 +487,8 @@ pub(super) struct Model {
 }
 impl Model {
     fn new(backend: &str, events: crossbeam_channel::Sender<Event>) -> Self {
-        Self {
+        #[allow(unused_mut)]
+        let mut model = Self {
             activity: Arc::default(),
             cursor: CursorVisibility::default(),
             bindings: None,
@@ -490,7 +505,15 @@ impl Model {
             sequence: 0,
             #[cfg(target_os = "linux")]
             session_locked: true,
+        };
+        #[cfg(target_os = "linux")]
+        if let Ok(Some(p)) = crate::system::policy()
+            && let Ok(s) = crate::system::active_session(&p)
+        {
+            model.state.session = s.id;
+            model.state.session_kind = if s.greeter { "greeter" } else { "user" }.into();
         }
+        model
     }
     fn publish(&self) {
         let _ = self.events.try_send(Event::State(self.state.clone()));
@@ -558,7 +581,7 @@ impl Model {
         let now = Instant::now();
         if !self.enabled
             || !self.state.ready
-            || self.state.locked
+            || !self.state.available()
             || buttons
             || !self.latch.eligible(now)
         {
@@ -612,7 +635,7 @@ impl Model {
     }
     fn placement(&mut self, s: &Segment, f: f64, generation: u64) -> Result<(u64, Point)> {
         ensure!(
-            self.enabled && self.state.ready && !self.state.locked,
+            self.enabled && self.state.available(),
             "Desktop is unavailable, paused or locked"
         );
         ensure!(

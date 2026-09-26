@@ -1,5 +1,10 @@
 # Easy-Switch Link
 
+Version 0.3.0 adds optional Linux system services, passive Wayland retry
+observation, and a GNOME companion for cursor hiding and opt-in login/lock-screen
+edge handoffs. See [Linux system operation](docs/SYSTEM-SERVICE.md) for activation,
+permissions, display bindings and current validation limits.
+
 A Rust desktop utility that makes linked Logitech Easy-Switch devices follow a
 computer change through **Logi Bolt or Unifying receivers**. Windows has a native
 tray icon; Linux supports StatusNotifierItem trays and a headless user service.
@@ -29,9 +34,9 @@ Download the appropriate artifact from `dist/` or the project's release artifact
 
 | Platform | Portable | Installer |
 | --- | --- | --- |
-| Windows 10/11 x64 | `easy-switch-link-0.2.3-windows-x64.exe` | `easy-switch-link-0.2.3-windows-x64.msi` |
-| Linux amd64 | `easy-switch-link-0.2.3-linux-amd64` | `easy-switch-link_0.2.3_amd64.deb` |
-| Linux arm64 | `easy-switch-link-0.2.3-linux-arm64` | `easy-switch-link_0.2.3_arm64.deb` |
+| Windows 10/11 x64 | `easy-switch-link-0.3.0-windows-x64.exe` | `easy-switch-link-0.3.0-windows-x64.msi` |
+| Linux amd64 | `easy-switch-link-0.3.0-linux-amd64` | `easy-switch-link_0.3.0_amd64.deb` |
+| Linux arm64 | `easy-switch-link-0.3.0-linux-arm64` | `easy-switch-link_0.3.0_arm64.deb` |
 
 1. Pair your devices to each computer using Logitech's normal pairing procedure.
    Each participating computer needs a compatible receiver and this application.
@@ -45,8 +50,9 @@ Download the appropriate artifact from `dist/` or the project's release artifact
    receive the corresponding host-switch command.
 
 Start at login is opt-in. Closing settings leaves the monitor running. Choose
-**Quit** from the tray to stop and restore reporting. Installers do not install a
-privileged monitoring service. Windows artifacts are unsigned unless signed by
+**Quit** from the tray to stop and restore reporting in user-only mode. Linux
+system services are optional and remain disabled until explicitly enabled.
+Windows artifacts are unsigned unless signed by
 the distributor; no certificate is included in this repository.
 
 Before uninstalling, turn off **Start at login** and choose **Quit** so reporting
@@ -55,14 +61,14 @@ can be restored. User configuration, device caches and recovery journals are ret
 ### Linux
 
 Debian 12+ and Ubuntu 22.04+ are the compatibility baseline. Install the `.deb`
-using `sudo apt install ./easy-switch-link_0.2.3_amd64.deb` (or the arm64 package).
+using `sudo apt install ./easy-switch-link_0.3.0_amd64.deb` (or the arm64 package).
 The package installs receiver permissions, a desktop launcher, icon and optional
 systemd user service. Reconnect the receiver if access is denied after installation.
 
 For the standalone executable, make it executable and install standard libraries:
 
 ```sh
-chmod +x easy-switch-link-0.2.3-linux-amd64
+chmod +x easy-switch-link-0.3.0-linux-amd64
 sudo apt install libudev1 libxkbcommon0 libxkbcommon-x11-0 libegl1 libgl1 libx11-6 libxi6 libxrandr2 libxcursor1 libwayland-client0 libwayland-cursor0 libwayland-egl1
 sudo install -m 644 packaging/linux/70-easy-switch-link.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
@@ -110,7 +116,8 @@ power cycle also clears temporary diversion.
 do not move devices. A successful command write means the request was sent, not
 that the destination received the device. An unavailable follower remains behind;
 there is no network channel for retrieving it. Manually align devices when needed.
-Bluetooth-direct connections and pre-login operation are outside this release.
+Bluetooth-direct connections remain unsupported. Optional Linux pre-login
+operation is described in [Linux system operation](docs/SYSTEM-SERVICE.md).
 
 Other configuration software can coexist with the HID reader, but overlapping
 Easy-Switch rules can conflict. The application checks the actual reporting state

@@ -4,6 +4,8 @@ mod cli;
 mod ipc;
 mod monitor;
 mod receiver;
+#[cfg(target_os = "linux")]
+mod service;
 mod storage;
 mod tray;
 mod ui;

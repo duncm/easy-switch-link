@@ -24,6 +24,21 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 pub enum Event {
+    #[cfg(target_os = "linux")]
+    SystemControl(Box<crate::service::Envelope>),
+    #[cfg(target_os = "linux")]
+    CoordinatorStatus(Box<easy_switch_core::follow::FollowStatus>),
+    #[cfg(target_os = "linux")]
+    SystemDisconnected(String),
+    #[cfg(target_os = "linux")]
+    SystemDeparture {
+        transaction: String,
+        written_ns: u64,
+    },
+    #[cfg(target_os = "linux")]
+    SessionChanged,
+    #[cfg(target_os = "linux")]
+    Supersede(tokio::sync::oneshot::Sender<Result<(), String>>),
     LayoutConfig {
         generation: u64,
         config: Config,

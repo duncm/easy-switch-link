@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+if [ "$1" = remove ] && [ -f /etc/easy-switch-link/policy.json ]; then
+    /usr/lib/easy-switch-link/service-admin disable
+fi

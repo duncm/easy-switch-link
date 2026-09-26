@@ -156,6 +156,19 @@ impl eframe::App for Settings {
                 }
             });
             ui.add_space(8.);
+            if self.status.service.mode == "system" {
+                ui.label(format!(
+                    "System service · owner UID {} · {}",
+                    self.status.service.owner_uid.unwrap_or_default(),
+                    self.status.service.seat
+                ));
+                ui.small(&self.status.service.observation);
+                ui.small(if self.status.service.login_handoffs {
+                    "Login/lock handoffs enabled; GNOME companion required"
+                } else {
+                    "Pre-login hardware synchronization enabled"
+                });
+            }
         });
         egui::TopBottomPanel::bottom("actions").show(ctx, |ui| {
             ui.add_space(8.);
@@ -276,7 +289,8 @@ impl eframe::App for Settings {
             }
             if let Some(request) = switch { self.send(request); }
             ui.separator();
-            self.dirty |= ui.checkbox(&mut self.draft.start_at_login, "Start at login").changed();
+            ui.add_enabled_ui(self.status.service.mode!="system", |ui| {self.dirty |= ui.checkbox(&mut self.draft.start_at_login, "Start at login").changed();});
+            if self.status.service.mode=="system" {ui.small("The system service starts at boot; its session companion starts at login. Use service disable to return to user-only startup.");}
             ui.collapsing("Import / export configuration", |ui| {
                 ui.label("Use a full file path. Imported device identities must be discovered on this computer before saving.");
                 ui.text_edit_singleline(&mut self.file_path);

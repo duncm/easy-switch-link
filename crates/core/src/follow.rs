@@ -301,6 +301,12 @@ impl FollowConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DesktopState {
     #[serde(default)]
+    pub session: String,
+    #[serde(default)]
+    pub session_kind: String,
+    #[serde(default)]
+    pub lock_handoffs: bool,
+    #[serde(default)]
     pub cursor_hidden: bool,
     #[serde(default)]
     pub cursor_visibility: String,
@@ -312,6 +318,11 @@ pub struct DesktopState {
     pub reason: String,
     pub pointer: Point,
     pub input_serial: u64,
+}
+impl DesktopState {
+    pub fn available(&self) -> bool {
+        self.ready && (!self.locked || self.lock_handoffs)
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PeerStatus {

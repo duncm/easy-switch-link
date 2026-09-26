@@ -2,3 +2,7 @@
 *.sh text eol=lf
 packaging/linux/postinst text eol=lf
 packaging/linux/postrm text eol=lf
+packaging/linux/** text eol=lf
+packaging/gnome/** text eol=lf
+*.py text eol=lf
+*.mjs text eol=lf

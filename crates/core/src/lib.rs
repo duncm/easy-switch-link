@@ -2,6 +2,7 @@ pub mod config;
 pub mod engine;
 pub mod follow;
 pub mod protocol;
+pub mod service;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -37,6 +38,8 @@ pub struct Control {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Status {
+    #[serde(default)]
+    pub service: service::ServiceStatus,
     #[serde(default)]
     pub follow: follow::FollowStatus,
     pub paused: bool,

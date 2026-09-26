@@ -19,6 +19,17 @@ use std::{
 };
 
 pub fn run(paths: Paths, headless: bool, diagnostics: bool) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if easy_switch_platform::system::policy()?.is_some() {
+        return crate::service::run_client(paths, headless, false);
+    }
+    run_inner(paths, headless, diagnostics, false)
+}
+#[cfg(target_os = "linux")]
+pub fn run_system(paths: Paths) -> Result<()> {
+    run_inner(paths, true, false, true)
+}
+fn run_inner(paths: Paths, headless: bool, diagnostics: bool, system_mode: bool) -> Result<()> {
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -60,8 +71,26 @@ pub fn run(paths: Paths, headless: bool, diagnostics: bool) -> Result<()> {
     let journal = receiver::Journal::open(paths.root.join("recovery.json"))?;
     let first_run = !paths.config().exists();
     let (control_tx, control_rx) = crossbeam_channel::bounded(32);
-    ipc::serve(paths.clone(), control_tx.clone())?;
+    if !system_mode {
+        ipc::serve(paths.clone(), control_tx.clone())?;
+    }
     let (events_tx, events_rx) = crossbeam_channel::bounded(256);
+    let edge_epoch = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+    #[cfg(target_os = "linux")]
+    let system = if system_mode {
+        let policy = easy_switch_platform::system::policy()?.context("Missing system policy")?;
+        let host =
+            crate::service::Host::start(policy, false, events_tx.clone(), edge_epoch.clone())?;
+        let tx = events_tx.clone();
+        let epoch = edge_epoch.clone();
+        easy_switch_platform::system::watch_sessions(move || {
+            epoch.fetch_add(1, Ordering::SeqCst);
+            let _ = tx.try_send(Event::SessionChanged);
+        })?;
+        Some(host)
+    } else {
+        None
+    };
     let (changes_tx, changes_rx) = crossbeam_channel::bounded(1);
     easy_switch_platform::watch_changes(changes_tx.clone())?;
     let stop_tx = control_tx.clone();
@@ -85,6 +114,12 @@ pub fn run(paths: Paths, headless: bool, diagnostics: bool) -> Result<()> {
     }
     let (follow_tx, follow_rx) = crossbeam_channel::bounded(16);
     let mut state = Monitor {
+        #[cfg(target_os = "linux")]
+        system,
+        #[cfg(target_os = "linux")]
+        coordinator: Default::default(),
+        #[cfg(target_os = "linux")]
+        transactions: Default::default(),
         follow_tx,
         engine,
         journal,
@@ -96,7 +131,7 @@ pub fn run(paths: Paths, headless: bool, diagnostics: bool) -> Result<()> {
         generation: 1,
         follow: None,
         follow_generation: 1,
-        edge_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        edge_epoch,
         ambiguous: std::collections::BTreeSet::new(),
         events: events_tx,
         retry: None,
@@ -104,6 +139,10 @@ pub fn run(paths: Paths, headless: bool, diagnostics: bool) -> Result<()> {
     };
     state.rescan()?;
     state.update_follow();
+    #[cfg(target_os = "linux")]
+    if let Some(host) = &state.system {
+        host.publish(state.status());
+    }
     loop {
         let retry_timer = state
             .retry
@@ -129,6 +168,10 @@ pub fn run(paths: Paths, headless: bool, diagnostics: bool) -> Result<()> {
                 state.retry = Some(Instant::now() + Duration::from_millis(250));
             }
             recv(retry_timer) -> _ => { state.retry = None; if let Err(e) = state.rescan() { state.message(format!("Receiver discovery: {e:#}")); } }
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(host) = &state.system {
+            host.publish(state.status());
         }
     }
     // Do not block the coordinator while bounded worker event queues are draining.
@@ -158,6 +201,12 @@ pub fn run(paths: Paths, headless: bool, diagnostics: bool) -> Result<()> {
 }
 
 struct Monitor {
+    #[cfg(target_os = "linux")]
+    system: Option<crate::service::Host>,
+    #[cfg(target_os = "linux")]
+    coordinator: easy_switch_core::follow::FollowStatus,
+    #[cfg(target_os = "linux")]
+    transactions: BTreeMap<String, Instant>,
     follow_tx: crossbeam_channel::Sender<crate::follow::Dispatch>,
     follow: Option<crate::follow::Manager>,
     follow_generation: u64,
@@ -177,6 +226,11 @@ struct Monitor {
 }
 impl Monitor {
     fn ensure_follow(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        ensure!(
+            self.system.is_none(),
+            "Desktop coordination belongs to the session/peer service"
+        );
         if self.follow.is_none() {
             let manager = crate::follow::Manager::start(
                 self.paths.clone(),
@@ -194,6 +248,10 @@ impl Monitor {
         Ok(())
     }
     fn update_follow(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.system.is_some() {
+            return;
+        }
         if !self.engine.config.follow.enabled {
             if let Some(follow) = self.follow.take() {
                 follow.shutdown();
@@ -236,14 +294,13 @@ impl Monitor {
             "Edge rule changed"
         );
         ensure!(
-            self.follow.as_ref().is_some_and(|f| {
-                let s = f.status();
-                s.desktop.ready
-                    && !s.desktop.locked
+            {
+                let s = self.follow_status();
+                s.desktop.available()
                     && s.peers
                         .iter()
                         .any(|p| p.id == request.rule.peer && p.trusted && p.ready)
-            }),
+            },
             "Desktop or destination became unavailable"
         );
         let mouse = self
@@ -277,7 +334,8 @@ impl Monitor {
             command.expires = Some(request.deadline);
             command.transaction = Some(request.transaction.clone());
             let primary = command.id == request.rule.mouse;
-            let recovery = if primary {
+            #[allow(unused_mut)]
+            let mut recovery = if primary {
                 None
             } else {
                 request
@@ -292,6 +350,18 @@ impl Monitor {
                         version: recovery_epoch,
                     })
             };
+            #[cfg(target_os = "linux")]
+            if !primary
+                && let Some(activity) = self.system.as_ref().and_then(|h| h.activity.as_ref())
+            {
+                recovery = activity
+                    .guard(&command.receiver, &self.engine.devices[&command.id].kind)
+                    .map(|activity| receiver::RecoveryPermission {
+                        activity,
+                        epoch: self.edge_epoch.clone(),
+                        version: recovery_epoch,
+                    });
+            }
             let Some(worker) = self.workers.get(&command.receiver) else {
                 if primary {
                     anyhow::bail!("Primary mouse receiver disappeared");
@@ -300,24 +370,31 @@ impl Monitor {
                 continue;
             };
             let epoch = worker.epoch.load(Ordering::Acquire);
+            #[allow(unused_mut)]
+            let mut departure = request.desktop.clone().filter(|_| primary).map(|desktop| {
+                let crossing = request.at;
+                Box::new(move |written| {
+                    let _ = desktop
+                        .send(easy_switch_platform::desktop::Command::Depart { crossing, written });
+                }) as Box<dyn FnOnce(Instant) + Send + Sync>
+            });
+            #[cfg(target_os = "linux")]
+            if primary && self.system.is_some() {
+                let tx = self.events.clone();
+                let transaction = request.transaction.clone();
+                departure = Some(Box::new(move |_| {
+                    let _ = tx.try_send(Event::SystemDeparture {
+                        transaction,
+                        written_ns: easy_switch_platform::system::monotonic_ns(),
+                    });
+                }));
+            }
             if let Err(error) = worker.send(Command::Switch {
                 command,
                 epoch,
                 received_at: request.at,
                 recovery,
-                departure: request.desktop.clone().filter(|_| primary).map(|desktop| {
-                    let crossing = request.at;
-                    Box::new(move |written| {
-                        if let Err(error) =
-                            desktop.send(easy_switch_platform::desktop::Command::Depart {
-                                crossing,
-                                written,
-                            })
-                        {
-                            tracing::warn!(%error, "Could not hide departed cursor");
-                        }
-                    }) as Box<dyn FnOnce(Instant) + Send + Sync>
-                }),
+                departure,
             }) {
                 if primary {
                     return Err(error);
@@ -341,7 +418,8 @@ impl Monitor {
     }
     fn status(&self) -> Status {
         Status {
-            follow: self.follow.as_ref().map(|f| f.status()).unwrap_or_default(),
+            service: self.service_status(),
+            follow: self.follow_status(),
             paused: self.engine.paused,
             configured: self
                 .engine
@@ -354,6 +432,35 @@ impl Monitor {
             receivers: self.receivers.clone(),
             messages: self.messages.iter().cloned().collect(),
             config: self.engine.config.clone(),
+        }
+    }
+    fn follow_status(&self) -> easy_switch_core::follow::FollowStatus {
+        #[cfg(target_os = "linux")]
+        if self.system.is_some() {
+            return self.coordinator.clone();
+        }
+        self.follow.as_ref().map(|f| f.status()).unwrap_or_default()
+    }
+    fn service_status(&self) -> easy_switch_core::service::ServiceStatus {
+        #[cfg(target_os = "linux")]
+        if let Some(h) = &self.system {
+            return easy_switch_core::service::ServiceStatus {
+                mode: "system".into(),
+                owner_uid: Some(h.policy.owner_uid),
+                seat: h.policy.seat.clone(),
+                login_handoffs: h.policy.login_handoffs,
+                generation: self.follow_generation,
+                instance: h.instance.clone(),
+                observation: h
+                    .activity
+                    .as_ref()
+                    .map(|a| a.description())
+                    .unwrap_or_default(),
+            };
+        }
+        easy_switch_core::service::ServiceStatus {
+            mode: "user".into(),
+            ..Default::default()
         }
     }
     fn invalidate(&mut self) {
@@ -435,6 +542,42 @@ impl Monitor {
     }
     fn event(&mut self, event: Event) {
         match event {
+            #[cfg(target_os = "linux")]
+            Event::SystemControl(envelope) => {
+                let result = self.system_control(envelope.uid, envelope.control);
+                let _ = envelope.reply.send(Response {
+                    ok: result.is_ok(),
+                    message: result.unwrap_or_else(|e| e.to_string()),
+                    status: Some(self.status()),
+                });
+            }
+            #[cfg(target_os = "linux")]
+            Event::SystemDeparture {
+                transaction,
+                written_ns,
+            } => {
+                if let Some(h) = &self.system {
+                    h.departure(transaction, written_ns);
+                }
+            }
+            #[cfg(target_os = "linux")]
+            Event::SessionChanged => {
+                self.invalidate();
+                self.coordinator.desktop.ready = false;
+            }
+            #[cfg(target_os = "linux")]
+            Event::CoordinatorStatus(_) => {}
+            #[cfg(target_os = "linux")]
+            Event::Supersede(reply) => {
+                self.invalidate();
+                let _ = reply.send(Ok(()));
+            }
+            #[cfg(target_os = "linux")]
+            Event::SystemDisconnected(reason) => {
+                self.invalidate();
+                self.coordinator.desktop.ready = false;
+                self.message(reason);
+            }
             Event::LayoutConfig { generation, config } => {
                 if generation != self.follow_generation {
                     return;
@@ -507,6 +650,18 @@ impl Monitor {
                 if self.ambiguous.contains(&device.id) {
                     device.online = false;
                 }
+                #[cfg(target_os = "linux")]
+                if device.online
+                    && device.kind == "mouse"
+                    && self
+                        .engine
+                        .devices
+                        .get(&device.id)
+                        .is_some_and(|old| !old.online)
+                    && let Some(host) = &self.system
+                {
+                    host.restore_cursor();
+                }
                 self.engine.devices.insert(device.id.clone(), device);
                 self.update_follow();
                 let devices: Vec<_> = self.engine.devices.values().collect();
@@ -559,6 +714,10 @@ impl Monitor {
         received_at: Instant,
     ) {
         self.edge_epoch.fetch_add(1, Ordering::SeqCst);
+        #[cfg(target_os = "linux")]
+        if let Some(host) = &self.system {
+            host.restore_cursor();
+        }
         for command in commands {
             if let Some(worker) = self.workers.get(&command.receiver) {
                 let epoch = worker.epoch.load(Ordering::Acquire);
@@ -649,11 +808,11 @@ impl Monitor {
                 let previous_startup = self.engine.config.start_at_login;
                 let startup_changed = config.start_at_login != previous_startup;
                 let executable = std::env::current_exe()?;
-                if startup_changed {
+                if startup_changed && !self.is_system() {
                     easy_switch_platform::set_autostart(config.start_at_login, &executable)?;
                 }
                 if let Err(error) = self.paths.save(&config) {
-                    if startup_changed {
+                    if startup_changed && !self.is_system() {
                         let _ = easy_switch_platform::set_autostart(previous_startup, &executable);
                     }
                     return Err(error);
@@ -682,6 +841,161 @@ impl Monitor {
             Request::Quit => Ok("Stopping and restoring reporting".into()),
         }
     }
+    fn is_system(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.system.is_some()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn system_control(
+        &mut self,
+        uid: u32,
+        c: easy_switch_core::service::Control,
+    ) -> Result<String> {
+        use easy_switch_core::service::Control;
+        use easy_switch_platform::system;
+        let host = self
+            .system
+            .as_ref()
+            .context("Not a system receiver owner")?;
+        match c {
+            Control::User { request } => {
+                ensure!(uid == host.policy.owner_uid, "Unauthorized owner");
+                if !matches!(request, Request::Status) {
+                    let active = system::active_session(&host.policy)?;
+                    ensure!(
+                        active.uid == uid && !active.greeter && !active.locked,
+                        "Owner session is no longer unlocked and active"
+                    );
+                }
+                self.handle(request)
+            }
+            Control::Coordinator { state } => {
+                let state = *state;
+                let active = system::active_session(&host.policy);
+                if !state.desktop.available() {
+                    self.edge_epoch.fetch_add(1, Ordering::SeqCst);
+                    self.coordinator = state;
+                    return Ok("Coordinator unavailable".into());
+                }
+                let active = active?;
+                ensure!(active.id == state.desktop.session, "Stale desktop session");
+                ensure!(
+                    !(active.locked || active.greeter) || host.policy.login_handoffs,
+                    "Pre-login handoffs disabled"
+                );
+                if self.coordinator.peers.iter().any(|old| {
+                    old.trusted
+                        && old.ready
+                        && !state
+                            .peers
+                            .iter()
+                            .any(|p| p.id == old.id && p.trusted && p.ready)
+                }) || self.coordinator.desktop.generation != state.desktop.generation
+                    || self.coordinator.desktop.session != state.desktop.session
+                {
+                    self.edge_epoch.fetch_add(1, Ordering::SeqCst);
+                }
+                self.coordinator = state;
+                Ok("Coordinator updated".into())
+            }
+            Control::Cancel => {
+                self.invalidate();
+                self.coordinator.desktop.ready = false;
+                Ok("Handoffs cancelled".into())
+            }
+            Control::Supersede => {
+                self.invalidate();
+                Ok("Earlier handoffs superseded".into())
+            }
+            Control::Layout { generation, config } => {
+                let active = system::active_session(&host.policy)?;
+                ensure!(
+                    active.id == self.coordinator.desktop.session,
+                    "Layout controller is stale"
+                );
+                ensure!(
+                    uid != host.policy.owner_uid || !active.locked && !active.greeter,
+                    "Layout changes require an unlocked owner session"
+                );
+                ensure!(
+                    generation == self.follow_generation,
+                    "Stale layout proposal"
+                );
+                easy_switch_core::service::validate_layout_update(&self.engine.config, &config)?;
+                self.paths.save(&config)?;
+                self.engine.replace_config(config);
+                self.configure()?;
+                Ok("Display bindings updated".into())
+            }
+            Control::Edge {
+                instance,
+                generation,
+                transaction,
+                rule,
+                session,
+                desktop_generation,
+                deadline_ns,
+            } => {
+                ensure!(instance == host.instance, "Receiver service restarted");
+                let active = system::active_session(&host.policy)?;
+                ensure!(
+                    active.id == session && self.coordinator.desktop.session == session,
+                    "Desktop session changed"
+                );
+                ensure!(
+                    !(active.locked || active.greeter) || host.policy.login_handoffs,
+                    "Locked handoffs disabled"
+                );
+                ensure!(
+                    desktop_generation == self.coordinator.desktop.generation,
+                    "Desktop topology changed"
+                );
+                let now = system::monotonic_ns();
+                ensure!(
+                    deadline_ns > now && deadline_ns - now <= 100_000_000,
+                    "Dispatch deadline invalid"
+                );
+                ensure!(
+                    !transaction.is_empty() && transaction.len() <= 128,
+                    "Invalid transaction"
+                );
+                self.transactions.retain(|_, until| *until > Instant::now());
+                ensure!(
+                    self.transactions.len() < 128 && !self.transactions.contains_key(&transaction),
+                    "Duplicate handoff or capacity exceeded"
+                );
+                self.transactions
+                    .insert(transaction.clone(), Instant::now() + Duration::from_secs(5));
+                let rule = self
+                    .engine
+                    .config
+                    .follow
+                    .rules
+                    .iter()
+                    .find(|r| r.id == rule)
+                    .context("Unconfigured edge rule")?
+                    .clone();
+                let (reply, _) = tokio::sync::oneshot::channel();
+                self.edge_dispatch(&crate::follow::Dispatch {
+                    desktop: None,
+                    transaction,
+                    deadline: Instant::now() + Duration::from_nanos(deadline_ns - now),
+                    rule,
+                    generation,
+                    at: Instant::now(),
+                    reply,
+                })?;
+                Ok("Handoff queued".into())
+            }
+            Control::Watch => anyhow::bail!("Watch is a transport operation"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -702,6 +1016,12 @@ mod tests {
             epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
         };
         let mut monitor = Monitor {
+            #[cfg(target_os = "linux")]
+            system: None,
+            #[cfg(target_os = "linux")]
+            coordinator: Default::default(),
+            #[cfg(target_os = "linux")]
+            transactions: Default::default(),
             follow_tx: crossbeam_channel::bounded(1).0,
             journal: receiver::Journal::open(paths.root.join("recovery.json")).unwrap(),
             paths,

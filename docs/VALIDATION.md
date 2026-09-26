@@ -1,5 +1,81 @@
 # Validation
 
+## 0.3.0 — optional Linux services and GNOME companion (2026-09-27)
+
+### Automated and native-runtime checks
+
+- Windows x64: 60 Rust tests, strict workspace Clippy and formatting pass.
+- Linux amd64 (isolated Ubuntu 22.04 root) and native Linux ARM64 (test-bravo,
+  Debian 13): 66 Rust tests and strict workspace Clippy pass. Coverage adds
+  service-account authorization, coordinator restrictions, bounded IPC frames,
+  configuration isolation, passive input classification, overflow and lost input
+  coverage. Existing protocol, TLS, replay, retry and cursor-ordering tests pass.
+  Live logind inspection also confirmed that test-bravo's Shell runs in the systemd
+  user manager; its narrowly scoped fallback checks the GNOME Shell unit, owning
+  UID, desktop type and logind's selected graphical session.
+  A read-only call to the production authorization function accepted test-bravo's
+  active GNOME X11 Shell through this fallback.
+- Production GNOME JavaScript passes tests using compositor doubles for late
+  hide requests, intervening input, placement deadlines, held buttons, bounds,
+  cancellation and stale controller messages. These are simulated compositor
+  operations, not physical pointer tests.
+- Native GJS/Gio on test-bravo passes the companion socket test: kernel credentials,
+  framed hello, hide/restore protocol and disconnect cleanup. The compositor is
+  replaced by a test double in this test; the socket implementation is real.
+- Read-only GNOME 48.7 API inspection on test-bravo confirms cursor visibility,
+  pointer warping, barrier construction and idle activity APIs. GNOME 48 uses
+  `set_pointer_visible`; newer inhibit/uninhibit APIs are selected only when both
+  are present. Metadata permits 45–51, with runtime checks; other versions have
+  not been tested.
+- An isolated nested Shell loaded the companion and reported it active in logs.
+  Subsequent extension-status queries timed out. An empty no-op extension
+  reproduced that failure in the same test environment. Full nested compositor
+  barrier/placement/cleanup acceptance therefore remains inconclusive.
+
+### Packaging and service isolation
+
+- All six 0.3.0 artifacts and the deterministic companion ZIP are produced with
+  locked dependencies. Linux release binaries target the Ubuntu 22.04 baseline;
+  ARM64 compilation against that baseline is cross-compiled, with Rust tests
+  separately run on native ARM64. Windows retains its static CRT and resources.
+  Final portable ARM64 version/help launch passes on test-bravo; Windows executable
+  resources and MSI metadata report 0.3.0. Both Debian packages require glibc 2.35,
+  preserving the Ubuntu 22.04 / Debian 12 baseline.
+- The disposable amd64 Ubuntu root passed 0.2.3-to-0.3.0 package upgrade,
+  reinstall, removal, portable headless IPC and systemd unit verification.
+  Installation leaves system mode disabled.
+- Dedicated service-account processes passed real Unix-socket authorization:
+  the designated owner can read status, while an unrelated UID and the peer
+  account cannot issue owner commands. Each service account is denied access to
+  the other's private state directory.
+- The root activation helper passed forced activation-failure rollback and a
+  configuration round-trip returning the latest service configuration to the
+  user. Service-manager commands were stubbed for those migration tests; receiver
+  process startup and IPC were tested separately with a private D-Bus daemon.
+  This does not establish successful live systemd sandbox or GDM activation.
+
+### Hardware and performance acceptance still required
+
+The installed applications and GNOME/GDM settings on test-alpha and test-bravo were not
+changed for these tests. No 0.3.0 pre-login or locked-session handoff has yet been
+confirmed on physical hardware. Earlier release confirmations and resource
+samples do not validate this release.
+
+Outstanding checks include test-alpha ↔ test-bravo GDM/locked/user-session round trips,
+mapped entry position and cursor hiding, input from unlinked devices, rapid
+reverse crossings and guarded retries, actual evdev permission coverage, GDM
+restart and logout/login, display scaling/hotplug, suspend/resume, failed extension
+loading, native ARM64 package upgrade/removal, and Windows MSI installation.
+Measure combined receiver/coordinator/session CPU and memory, preparation/dispatch
+latency and radio reconnection separately on that setup. The existing 0.1% CPU,
+30 MiB resident-memory and 100 ms dispatch goals remain unverified for system mode.
+
+Use `docs/SYSTEM-SERVICE.md` for explicit opt-in and recovery instructions. Missing
+or unauthorized compositor sessions must report unavailable and leave hardware
+on the source; physical Easy-Switch synchronization remains independent of LAN
+and compositor readiness. Windows secure desktops and non-GNOME greeters are
+outside this release.
+
 ## 0.2.0 — destination follows mouse (2026-09-24)
 
 ### Automated and package checks

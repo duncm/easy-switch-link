@@ -52,10 +52,16 @@ winresource = "0.1"
 maintainer = "Duncan Maitland"
 copyright = "2026 Duncan Maitland"
 license-file = ["../../LICENSE", "0"]
-depends = "$auto, libxkbcommon0, libxkbcommon-x11-0, libegl1, libgl1, libx11-6, libxi6, libxrandr2, libxcursor1, libwayland-client0, libwayland-cursor0, libwayland-egl1"
+depends = "$auto, python3, libxkbcommon0, libxkbcommon-x11-0, libegl1, libgl1, libx11-6, libxi6, libxrandr2, libxcursor1, libwayland-client0, libwayland-cursor0, libwayland-egl1"
 section = "utils"
 priority = "optional"
 assets = [
+  ["../../packaging/linux/easy-switch-link-hardware.service", "usr/lib/systemd/system/", "644"],
+  ["../../packaging/linux/easy-switch-link-peer.service", "usr/lib/systemd/system/", "644"],
+  ["../../packaging/linux/easy-switch-link.sysusers", "usr/lib/sysusers.d/easy-switch-link.conf", "644"],
+  ["../../packaging/linux/service-admin", "usr/lib/easy-switch-link/service-admin", "755"],
+  ["../../packaging/gnome/easy-switch-link@duncm.github.com/metadata.json", "usr/share/gnome-shell/extensions/easy-switch-link@duncm.github.com/metadata.json", "644"],
+  ["../../packaging/gnome/easy-switch-link@duncm.github.com/extension.js", "usr/share/gnome-shell/extensions/easy-switch-link@duncm.github.com/extension.js", "644"],
   ["target/release/easy-switch-link", "usr/bin/", "755"],
   ["../../packaging/linux/70-easy-switch-link.rules", "usr/lib/udev/rules.d/", "644"],
   ["../../packaging/linux/easy-switch-link.desktop", "usr/share/applications/", "644"],
@@ -63,6 +69,7 @@ assets = [
   ["../../assets/easy-switch-link.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
   ["../../docs/DESTINATION-FOLLOWS-MOUSE.md", "usr/share/doc/easy-switch-link/docs/DESTINATION-FOLLOWS-MOUSE.md", "644"],
   ["../../docs/VALIDATION.md", "usr/share/doc/easy-switch-link/docs/VALIDATION.md", "644"],
+  ["../../docs/SYSTEM-SERVICE.md", "usr/share/doc/easy-switch-link/docs/SYSTEM-SERVICE.md", "644"],
   ["../../README.md", "usr/share/doc/easy-switch-link/README.md", "644"],
 ]
 maintainer-scripts = "../../packaging/linux"

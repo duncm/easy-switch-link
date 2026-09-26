@@ -1,0 +1,2 @@
+u easy-switch-link - "Easy-Switch Link receiver service" /var/lib/easy-switch-link/hardware /usr/sbin/nologin
+u easy-switch-link-peer - "Easy-Switch Link peer coordinator" /var/lib/easy-switch-link/peer /usr/sbin/nologin
