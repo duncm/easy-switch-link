@@ -19,11 +19,13 @@ pub fn start(
     mut commands: mpsc::Receiver<Command>,
     events: crossbeam_channel::Sender<Event>,
     private_dir: std::path::PathBuf,
+    activity: Arc<InputActivity>,
 ) -> Result<Arc<dyn Fn() + Send + Sync>> {
     std::thread::Builder::new()
         .name("wayland-portals".into())
         .spawn(move || {
             let mut model = Model::new("Wayland portals/EIS", events);
+            model.activity = activity;
             model.unavailable("Grant desktop access in Destination follows mouse settings");
             let result = (|| -> Result<()> {
                 model.load_bindings(&private_dir)?;
@@ -237,14 +239,15 @@ async fn session(
     let mut buttons = BTreeSet::new();
     let mut sequence = 0u32;
     let mut capture_sequence = None;
+    let mut pending_command = None;
     let result=async{loop{tokio::select!{
-        command=commands.recv()=>{let Some(command)=command else{break};match command {
+        command=async { if let Some(c)=pending_command.take() {Some(c)} else {commands.recv().await} }=>{let Some(command)=command else{break};match command {
             Command::Stop=>{commands.close();break;},Command::Authorize=>{},
             // Portals cannot hide a desktop cursor without capturing all input.
             Command::Depart{..}=>{},
             Command::Restore(reply)=>{let _=reply.send(());},
-            Command::SessionLocked(locked)=>{model.session_locked=locked;model.state.locked=locked;model.reservation=None;model.publish();names=set_barriers(&input,&input_session,model).await?;},
-            Command::Configure{enabled,rules}=>{model.enabled=enabled;model.rules=rules;model.reservation=None;names=set_barriers(&input,&input_session,model).await?;},
+            Command::SessionLocked(locked)=>{model.latch.reset();model.session_locked=locked;model.state.locked=locked;model.reservation=None;model.publish();names=set_barriers(&input,&input_session,model).await?;},
+            Command::Configure{enabled,rules}=>{model.latch.reset();model.enabled=enabled;model.rules=rules;model.reservation=None;names=set_barriers(&input,&input_session,model).await?;},
             Command::Place{segment,fraction,generation,reply,deadline}=>{ if reply.is_closed() || Instant::now()>=deadline { continue; }
                 let result=(||->Result<u64>{let(id,p)=model.placement(&segment,fraction,generation)?;let device=devices.iter().find(|d|resumed.contains(&format!("{:?}",d.device())) && d.regions().iter().any(|r|r.mapping_id.as_ref().is_some_and(|v|format!("wayland:{v}")==segment.display))).context("No active EIS absolute-position region")?;let pointer=device.interface::<ei::PointerAbsolute>().context("Compositor does not support absolute cursor placement")?;sequence=sequence.wrapping_add(1);let serial=send_connection.serial();device.device().start_emulating(sequence,serial);pointer.motion_absolute(p.x as f32,p.y as f32);device.device().frame(serial,0);device.device().stop_emulating(serial);send_connection.flush()?;model.state.pointer=p;Ok(id)})();let _=reply.send(result.map_err(|e|e.to_string()));
             },
@@ -260,20 +263,50 @@ async fn session(
             EiEvent::DeviceRemoved(e)=>{devices.retain(|d|d!=&e.device);resumed.remove(&format!("{:?}",e.device.device()));model.unavailable("EIS display removed; verify display bindings");},
             EiEvent::Disconnected(_)=>bail!("EIS permission/session closed"),_=>{}
         }},
-        event=receiver.next()=>{match event.context("EIS receiver disconnected")?? {EiEvent::SeatAdded(e)=>{e.seat.bind_capabilities(DeviceCapability::Pointer|DeviceCapability::PointerAbsolute|DeviceCapability::Button);receive_context.flush()?;},EiEvent::DeviceStartEmulating(e)=>{capture_sequence=Some(e.sequence);buttons.clear();},EiEvent::Button(e)=>{if e.state==ei::button::ButtonState::Press{buttons.insert(e.button);}else{buttons.remove(&e.button);}model.state.input_serial=model.state.input_serial.wrapping_add(1);},EiEvent::PointerMotion(e)=>{model.state.input_serial=model.state.input_serial.wrapping_add(1);let p=Point{x:model.state.pointer.x+e.dx as f64,y:model.state.pointer.y+e.dy as f64};let _=model.latch.eligible(p,Instant::now());},EiEvent::Disconnected(_)=>bail!("InputCapture EIS session closed"),_=>{}}},
+        event=receiver.next()=>{match event.context("EIS receiver disconnected")?? {EiEvent::SeatAdded(e)=>{e.seat.bind_capabilities(DeviceCapability::Pointer|DeviceCapability::PointerAbsolute|DeviceCapability::Button);receive_context.flush()?;},EiEvent::DeviceStartEmulating(e)=>{capture_sequence=Some(e.sequence);buttons.clear();},EiEvent::Button(e)=>{if e.state==ei::button::ButtonState::Press{buttons.insert(e.button);}else{buttons.remove(&e.button);}model.state.input_serial=model.state.input_serial.wrapping_add(1);},EiEvent::PointerMotion(e)=>{model.state.input_serial=model.state.input_serial.wrapping_add(1);let _=e;},EiEvent::Disconnected(_)=>bail!("InputCapture EIS session closed"),_=>{}}},
         event=activated.next()=>{let e=event.context("Capture portal closed")?;let position=e.cursor_position();let barrier=e.barrier_id();
-            // Synchronize portal activation with an EIS frame before examining
-            // held buttons. Always release capture within a bounded interval.
-            let state_ready=tokio::time::timeout(Duration::from_millis(40),async {
-                loop {match receiver.next().await {
-                    Some(Ok(EiEvent::DeviceStartEmulating(event)))=>{capture_sequence=Some(event.sequence);buttons.clear();},
-                    Some(Ok(EiEvent::Button(event)))=>{if event.state==ei::button::ButtonState::Press{buttons.insert(event.button);}else{buttons.remove(&event.button);}},
-                    Some(Ok(EiEvent::Frame(_))) if capture_sequence==e.activation_id()=>return true,
-                    None|Some(Err(_))|Some(Ok(EiEvent::Disconnected(_)))=>return false,
-                    _=>{}
-                }}
-            }).await.unwrap_or(false);
-            if state_ready && let (Some((x,y)),Some(capture::ActivatedBarrier::Barrier(barrier)))=(position,barrier)&& let Some(id)=names.get(&barrier.get())&& let Some(rule)=model.rules.iter().find(|r|r.id==*id).cloned()&& let Some(d)=model.state.displays.iter().find(|d|d.id==rule.source.display){let p=Point{x:(x as f64).clamp(d.x,d.x+d.width-1.0),y:(y as f64).clamp(d.y,d.y+d.height-1.0)};let delta=match rule.source.edge{Edge::Left=>Point{x:-1.0,y:0.0},Edge::Right=>Point{x:1.0,y:0.0},Edge::Top=>Point{x:0.0,y:-1.0},Edge::Bottom=>Point{x:0.0,y:1.0}};model.latch.cooldown_elapsed(Instant::now());model.movement(p,delta,!buttons.is_empty(),false);}
+            // Capture is needed to observe a push beyond a Wayland boundary.
+            // Consume real EIS motion, never an artificial activation delta.
+            // Release on threshold, reverse motion, input buttons, control commands,
+            // or 200 ms without a complete push. Nothing is forwarded over the LAN.
+            model.latch.reset();
+            if model.enabled && !model.state.locked && model.latch.eligible(Instant::now())
+                && let (Some((x,y)),Some(capture::ActivatedBarrier::Barrier(barrier)))=(position,barrier)
+                && let Some(id)=names.get(&barrier.get())
+                && let Some(rule)=model.rules.iter().find(|r|r.id==*id).cloned()
+                && let Some(d)=model.state.displays.iter().find(|d|d.id==rule.source.display).cloned()
+            {
+                let mut p=Point{x:(x as f64).clamp(d.x,d.x+d.width-1.0),y:(y as f64).clamp(d.y,d.y+d.height-1.0)};
+                model.state.pointer=p;
+                let mut motion=Vec::new();
+                let _=tokio::time::timeout(Duration::from_millis(200),async {
+                    loop {
+                        tokio::select! {
+                            command=commands.recv()=>{pending_command=command;break;},
+                            event=receiver.next()=>{match event {
+                                Some(Ok(EiEvent::DeviceStartEmulating(event)))=>{capture_sequence=Some(event.sequence);buttons.clear();motion.clear();},
+                                Some(Ok(EiEvent::Button(event)))=>{if event.state==ei::button::ButtonState::Press{buttons.insert(event.button);}else{buttons.remove(&event.button);}},
+                                Some(Ok(EiEvent::PointerMotion(event))) if capture_sequence==e.activation_id()=>{
+                                    if motion.len()>=128 {break;}
+                                    motion.push(Point{x:event.dx as f64,y:event.dy as f64});
+                                },
+                                Some(Ok(EiEvent::Frame(_))) if capture_sequence==e.activation_id()=>{
+                                    if !buttons.is_empty() {break;}
+                                    for delta in motion.drain(..) {
+                                        if rule.source.edge.outward(delta)<0.0 {return;}
+                                        p=Point{x:(p.x+delta.x).clamp(d.x,d.x+d.width-1.0),y:(p.y+delta.y).clamp(d.y,d.y+d.height-1.0)};
+                                        model.movement(p,delta,false,false);
+                                        if !model.latch.eligible(Instant::now()) {return;}
+                                    }
+                                },
+                                None|Some(Err(_))|Some(Ok(EiEvent::Disconnected(_)))=>break,
+                                _=>{}
+                            }}
+                        }
+                    }
+                }).await;
+                model.latch.reset();
+            }
             input.release(&input_session,capture::ReleaseOptions::default().set_activation_id(e.activation_id())).await?;
         },
         _=disabled.next()=>{model.unavailable("Desktop disabled input capture; grant access again");bail!("Input capture disabled");},

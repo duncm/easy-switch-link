@@ -48,7 +48,11 @@ pub struct Manager {
     status: Arc<Mutex<FollowStatus>>,
 }
 impl Manager {
-    pub fn start(paths: Paths, dispatch: crossbeam_channel::Sender<Dispatch>) -> Result<Self> {
+    pub fn start(
+        paths: Paths,
+        dispatch: crossbeam_channel::Sender<Dispatch>,
+        monitor_events: crossbeam_channel::Sender<crate::receiver::Event>,
+    ) -> Result<Self> {
         let (tx, rx) = mpsc::channel(64);
         let status = Arc::new(Mutex::new(FollowStatus::default()));
         let (finished_tx, finished) = crossbeam_channel::bounded(1);
@@ -61,7 +65,14 @@ impl Manager {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()?;
-                    rt.block_on(run(paths, rx, thread_tx, thread_status.clone(), dispatch))
+                    rt.block_on(run(
+                        paths,
+                        rx,
+                        thread_tx,
+                        thread_status.clone(),
+                        dispatch,
+                        monitor_events,
+                    ))
                 })();
                 if let Err(e) = result {
                     thread_status.lock().unwrap().message = format!("Edge coordinator: {e:#}");
@@ -152,6 +163,7 @@ struct Peer {
     expires: Instant,
 }
 struct Shared {
+    monitor_events: crossbeam_channel::Sender<crate::receiver::Event>,
     paths: Paths,
     id: String,
     gate: Arc<Mutex<Gate>>,
@@ -168,6 +180,36 @@ struct Shared {
 }
 type State = Arc<Mutex<Shared>>;
 impl Shared {
+    fn refresh_layouts(&self) {
+        let mut config = self.local.config.clone();
+        let mut changed = false;
+        for rule in &mut config.follow.rules {
+            if self.desktop_state.ready {
+                changed |= rule.source.rebind(&self.desktop_state.displays);
+            }
+            if let Some(peer) = self.peers.get(&rule.peer).filter(|p| {
+                p.status.trusted
+                    && p.status.connected
+                    && p.status.ready
+                    && p.status.computer == rule.computer
+                    && self
+                        .trust
+                        .get(&rule.peer)
+                        .is_some_and(|t| t.computer == rule.computer)
+            }) {
+                changed |= rule.destination.rebind(&peer.status.displays);
+            }
+        }
+        if changed {
+            let _ = self
+                .monitor_events
+                .try_send(crate::receiver::Event::LayoutConfig {
+                    generation: self.local.generation,
+                    config,
+                });
+        }
+    }
+
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             port: self.local.config.follow.port,
@@ -328,6 +370,7 @@ async fn run(
     command_tx: mpsc::Sender<Command>,
     status: Arc<Mutex<FollowStatus>>,
     dispatch: crossbeam_channel::Sender<Dispatch>,
+    monitor_events: crossbeam_channel::Sender<crate::receiver::Event>,
 ) -> Result<()> {
     let identity = Identity::load(&paths.root)?;
     let trust: BTreeMap<String, Trust> =
@@ -338,6 +381,7 @@ async fn run(
     }));
     let (client, server) = identity.configs(gate.clone())?;
     let shared = Arc::new(Mutex::new(Shared {
+        monitor_events,
         paths,
         id: fingerprint(&identity.certificate),
         gate,
@@ -376,6 +420,7 @@ async fn run(
                         s.pending.clear();
                     }
                     s.local = local;
+                    s.refresh_layouts();
                     s.gate.lock().unwrap().enabled = enabled;
                     if desktop_changed && let Some(d) = &s.desktop {
                         let _ = d.send(desktop::Command::Configure {
@@ -487,6 +532,7 @@ async fn run(
                         s.pending.clear();
                     }
                     s.desktop_state = snapshot;
+                    s.refresh_layouts();
                     s.publish();
                     s.broadcast();
                 }
@@ -847,6 +893,7 @@ async fn connection(
                 expires: Instant::now() + Duration::from_secs(120),
             },
         );
+        s.refresh_layouts();
         s.publish();
     }
     let (mut reader, mut writer) = tokio::io::split(stream);
@@ -876,7 +923,7 @@ if let Some((_,token,_))=reservation.take()&& let Some(d)=&shared.lock().unwrap(
                 match message {
                     Wire::Bye=>break,
                     Wire::Confirm=>{let mut s=shared.lock().unwrap();let p=s.peers.get_mut(&id).context("Pairing lost")?;ensure!(p.expires>Instant::now(),"Pairing expired");p.theirs=true;finish_pair(&mut s,&id)?;s.publish();},
-                    Wire::State{state}=>{ensure!(state.desktop.displays.len()<=32 && state.desktop.displays.iter().all(|d|d.valid()),"Invalid peer displays");let mut s=shared.lock().unwrap();let p=s.peers.get_mut(&id).context("Peer gone")?;ensure!(p.status.computer==state.computer,"Peer logical identity changed");p.status.ready=state.ready;p.status.reason=state.desktop.reason;p.status.displays=state.desktop.displays;p.status.generation=state.desktop.generation;p.status.config_generation=state.config_generation;s.publish();},
+                    Wire::State{state}=>{ensure!(state.desktop.displays.len()<=32 && state.desktop.displays.iter().all(|d|d.valid()),"Invalid peer displays");let mut s=shared.lock().unwrap();let p=s.peers.get_mut(&id).context("Peer gone")?;ensure!(p.status.computer==state.computer,"Peer logical identity changed");p.status.ready=state.ready;p.status.reason=state.desktop.reason;p.status.displays=state.desktop.displays;p.status.generation=state.desktop.generation;p.status.config_generation=state.config_generation;if !state.ready && let Some(d)=&s.desktop {d.cancel_retries();}s.refresh_layouts();s.publish();},
                     Wire::Prepare{id:transaction,destination,fraction,layout,config_generation,computer,group,mouse}=>{
                         ensure!(transaction.len()==32 && seen.len()<256 && seen.insert(transaction.clone()),"Replayed handoff or session transaction limit reached");
                         let preparation=(||->Result<desktop::Handle>{let s=shared.lock().unwrap();ensure!(s.snapshot().ready && s.local.generation==config_generation && s.local.config.follow.local_computer==computer,"Destination not ready or configuration changed");ensure!(reservation.is_none(),"Destination busy");ensure!(s.local.config.groups.iter().any(|g|g.id==group && g.devices.iter().any(|m|m.id==mouse && m.channels.contains_key(&computer))),"Destination group/mouse mapping not enrolled");s.desktop.clone().context("No desktop capability")})();
@@ -900,6 +947,9 @@ if let Some((_,token,_))=reservation.take()&& let Some(d)=&shared.lock().unwrap(
         let _ = d.send(desktop::Command::Cancel(token));
     }
     if s.peers.get(&id).is_some_and(|p| p.session == session) {
+        if let Some(d) = &s.desktop {
+            d.cancel_retries();
+        }
         s.peers.remove(&id);
         s.pending
             .retain(|key, _| !key.starts_with(&format!("{id}:")));

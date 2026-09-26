@@ -25,6 +25,14 @@ impl Edge {
             Self::Bottom => Self::Top,
         }
     }
+    pub fn outward(self, delta: Point) -> f64 {
+        match self {
+            Self::Left => -delta.x,
+            Self::Right => delta.x,
+            Self::Top => -delta.y,
+            Self::Bottom => delta.y,
+        }
+    }
     pub fn vertical(self) -> bool {
         matches!(self, Self::Left | Self::Right)
     }
@@ -94,6 +102,19 @@ impl Default for Segment {
     }
 }
 impl Segment {
+    /// Automatically accept new geometry only for the same unambiguous display.
+    pub fn rebind(&mut self, displays: &[Display]) -> bool {
+        let mut matches = displays.iter().filter(|d| d.id == self.display);
+        let Some(d) = matches.next() else {
+            return false;
+        };
+        if matches.next().is_some() || !d.valid() || d.binding == self.binding {
+            return false;
+        }
+        self.binding = d.binding.clone();
+        true
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             !self.display.is_empty()
@@ -348,37 +369,97 @@ pub enum Action {
     Reverse { id: String },
 }
 
-/// Anti-bounce latch shared by all native backends. Clock is supplied for tests.
+/// Outward pressure is the main guard. A short cooldown discards queued events
+/// from the previous crossing/arrival without requiring an inward detour.
 #[derive(Default)]
 pub struct EdgeLatch {
-    blocked: Option<(Display, Edge, Instant, bool)>,
+    blocked_until: Option<Instant>,
+    pressure: Option<(String, f64, Instant)>,
 }
 impl EdgeLatch {
-    pub fn block(&mut self, display: Display, edge: Edge, now: Instant) {
-        self.blocked = Some((display, edge, now, false));
+    pub const BUFFER: f64 = 12.0;
+    pub const COOLDOWN: Duration = Duration::from_millis(80);
+    pub const PRESSURE_TIMEOUT: Duration = Duration::from_millis(250);
+
+    pub fn block(&mut self, now: Instant) {
+        self.reset();
+        self.blocked_until = Some(now + Self::COOLDOWN);
     }
-    /// Portals cannot observe motion outside capture; use the approved cooldown.
-    pub fn cooldown_elapsed(&mut self, now: Instant) {
-        if self.blocked.as_ref().is_some_and(|(_, _, t, _)| {
-            now.saturating_duration_since(*t) >= Duration::from_millis(500)
-        }) {
-            self.blocked = None;
-        }
+    pub fn reset(&mut self) {
+        self.pressure = None;
     }
-    pub fn eligible(&mut self, p: Point, now: Instant) -> bool {
-        if let Some((d, edge, t, inward)) = &mut self.blocked {
-            *inward |= d.inward(*edge, p) >= 16.0 * d.scale;
-            if now.saturating_duration_since(*t) < Duration::from_millis(500) || !*inward {
-                return false;
-            }
+    pub fn eligible(&self, now: Instant) -> bool {
+        self.blocked_until.is_none_or(|until| now >= until)
+    }
+    pub fn pending(&self, rule: &str, now: Instant) -> bool {
+        self.pressure.as_ref().is_some_and(|(id, _, at)| {
+            id == rule && now.saturating_duration_since(*at) < Self::PRESSURE_TIMEOUT
+        })
+    }
+    pub fn push(&mut self, rule: &str, distance: f64, now: Instant) -> bool {
+        if !self.eligible(now) || !distance.is_finite() || distance < 0.0 {
+            self.reset();
+            return false;
         }
-        self.blocked = None;
-        true
+        if !self.pending(rule, now) {
+            self.pressure = Some((rule.into(), 0.0, now));
+        }
+        let (_, total, at) = self.pressure.as_mut().unwrap();
+        *total += distance;
+        *at = now;
+        if *total >= Self::BUFFER {
+            self.block(now);
+            true
+        } else {
+            false
+        }
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn layout_rebind_preserves_monitor_and_segment_and_rejects_ambiguity() {
+        let mut d = display();
+        let mut s = Segment {
+            display: d.id.clone(),
+            binding: d.binding.clone(),
+            start: 33.3,
+            ..Default::default()
+        };
+        d.x = 0.0;
+        d.scale = 2.0;
+        d.binding = "changed-layout".into();
+        assert!(s.rebind(&[d.clone()]));
+        assert_eq!(s.binding, "changed-layout");
+        assert_eq!(s.start, 33.3);
+        assert!(!s.rebind(&[d.clone()]));
+        d.binding = "newer".into();
+        assert!(!s.rebind(&[d.clone(), d.clone()]));
+        d.id = "replacement-monitor".into();
+        assert!(!s.rebind(&[d]));
+        assert_eq!(s.binding, "changed-layout");
+    }
+    #[test]
+    fn pressure_does_not_carry_between_rules_or_across_idle_gaps() {
+        let at = Instant::now();
+        let mut latch = EdgeLatch::default();
+        assert!(!latch.push("one", 8.0, at));
+        assert!(!latch.push("two", 4.0, at));
+        assert!(!latch.push("two", 8.0, at + EdgeLatch::PRESSURE_TIMEOUT));
+        latch.reset();
+        assert!(!latch.push("two", 4.0, at + EdgeLatch::PRESSURE_TIMEOUT));
+        assert!(latch.push("two", 8.0, at + EdgeLatch::PRESSURE_TIMEOUT));
+    }
+    #[test]
+    fn fresh_pressure_can_return_after_eighty_ms_without_inward_motion() {
+        let at = Instant::now();
+        let mut latch = EdgeLatch::default();
+        assert!(latch.push("out", EdgeLatch::BUFFER, at));
+        assert!(!latch.push("back", 100.0, at + Duration::from_millis(79)));
+        assert!(!latch.push("back", 6.0, at + Duration::from_millis(80)));
+        assert!(latch.push("back", 6.0, at + Duration::from_millis(81)));
+    }
     fn display() -> Display {
         Display {
             id: "a".into(),
@@ -426,17 +507,6 @@ mod tests {
             ),
             None
         );
-        let mut latch = EdgeLatch::default();
-        let now = Instant::now();
-        latch.block(d, Edge::Right, now);
-        assert!(!latch.eligible(
-            Point { x: -40.0, y: 540.0 },
-            now + Duration::from_millis(100)
-        ));
-        assert!(latch.eligible(
-            Point { x: -1.0, y: 540.0 },
-            now + Duration::from_millis(501)
-        ));
     }
     #[test]
     fn overlapping_source_rules_are_rejected_but_adjacent_segments_are_valid() {
@@ -526,9 +596,10 @@ mod tests {
         assert!(!s.hit(&d, Point { x: -1.0, y: 100.0 }, Point { x: -5.0, y: 0.0 }));
         let now = Instant::now();
         let mut latch = EdgeLatch::default();
-        latch.block(d, Edge::Right, now);
-        assert!(!latch.eligible(Point { x: -8.0, y: 20.0 }, now));
-        assert!(!latch.eligible(Point { x: -8.0, y: 20.0 }, now + Duration::from_secs(1)));
-        assert!(latch.eligible(Point { x: -32.0, y: 20.0 }, now + Duration::from_secs(1)));
+        latch.block(now);
+        assert!(!latch.push("edge", 50.0, now));
+        let ready = now + EdgeLatch::COOLDOWN;
+        assert!(!latch.push("edge", 6.0, ready));
+        assert!(latch.push("edge", 6.0, ready));
     }
 }

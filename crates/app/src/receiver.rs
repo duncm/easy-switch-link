@@ -24,6 +24,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 pub enum Event {
+    LayoutConfig {
+        generation: u64,
+        config: Config,
+    },
     Device(Device),
     Report {
         receiver: String,
@@ -48,6 +52,7 @@ pub enum Command {
         epoch: u64,
         received_at: Instant,
         departure: Option<Box<dyn FnOnce(Instant) + Send + Sync>>,
+        recovery: Option<RecoveryPermission>,
     },
     Recover,
     Refresh,
@@ -66,6 +71,7 @@ pub struct PendingSwitch {
     epoch: u64,
     received_at: Instant,
     departure: Option<Box<dyn FnOnce(Instant) + Send + Sync>>,
+    recovery: Option<RecoveryPermission>,
 }
 impl Drop for Worker {
     fn drop(&mut self) {
@@ -84,6 +90,7 @@ impl Worker {
             epoch,
             received_at,
             departure,
+            recovery,
         } = command
         {
             self.switches
@@ -92,6 +99,7 @@ impl Worker {
                     epoch,
                     received_at,
                     departure,
+                    recovery,
                 })
                 .context("Receiver switch queue is full or disconnected")?;
         } else {
@@ -196,6 +204,8 @@ pub fn spawn(
                 reporting_checks: BTreeSet::new(),
                 next_software_id: 8,
                 switches: switch_rx,
+                retries: BTreeMap::new(),
+                device_input: BTreeMap::new(),
             };
             if let Err(error) = session.run(rx) {
                 let _ = events.send(Event::Lost(id, generation >> 32, format!("{error:#}")));
@@ -228,6 +238,8 @@ struct Session {
     reporting_checks: BTreeSet<(u8, u16)>,
     next_software_id: u8,
     switches: Receiver<PendingSwitch>,
+    retries: BTreeMap<u8, FollowerRetry>,
+    device_input: BTreeMap<u8, u64>,
 }
 
 impl Session {
@@ -261,6 +273,7 @@ impl Session {
             .send(Event::Ready(self.info.id.clone(), self.generation >> 32))?;
         loop {
             self.dispatch_pending_switches()?;
+            self.service_retry()?;
             loop {
                 let command = match commands.try_recv() {
                     Ok(command) => command,
@@ -311,12 +324,14 @@ impl Session {
                         epoch,
                         received_at,
                         departure,
+                        recovery,
                     } => {
                         self.dispatch_switch(PendingSwitch {
                             command,
                             epoch,
                             received_at,
                             departure,
+                            recovery,
                         })?;
                     }
                 }
@@ -334,7 +349,8 @@ impl Session {
                 self.check_reporting(slot, cid)?;
                 continue;
             }
-            if let Some(bytes) = self.transport.read(None)? {
+            let timeout = self.retry_wait(None);
+            if let Some(bytes) = self.transport.read(timeout)? {
                 self.receive(&bytes);
             }
         }
@@ -357,6 +373,12 @@ impl Session {
             }
         }
         if let Some(d) = self.devices.get(&report.device) {
+            // Easy-Switch/diverted controls may bypass ordinary OS keyboard input.
+            // Count their notifications even while cached availability is stale.
+            if report.notification() && Some(report.feature) == d.reprog {
+                let serial = self.device_input.entry(report.device).or_default();
+                *serial = serial.wrapping_add(1);
+            }
             if report.notification() && Some(report.feature) == d.wireless_status {
                 self.reprobe.insert(report.device);
                 self.reporting_checks
@@ -405,7 +427,26 @@ impl Session {
             epoch,
             received_at,
             departure,
+            recovery,
         } = pending;
+        self.retries.remove(&command.slot);
+        if let Some(permission) = recovery {
+            if permission.epoch.load(Ordering::SeqCst) != permission.version {
+                return Ok(());
+            }
+            self.retries.insert(
+                command.slot,
+                FollowerRetry {
+                    command: command.clone(),
+                    epoch,
+                    permission,
+                    checks: 0,
+                    input_serial: self.device_input.get(&command.slot).copied().unwrap_or(0),
+                    due: Instant::now() + Duration::from_millis(250),
+                    until: Instant::now() + Duration::from_secs(3),
+                },
+            );
+        }
         if epoch != self.active_epoch.load(Ordering::Acquire)
             || epoch != self.epoch
             || self.paused
@@ -493,22 +534,27 @@ impl Session {
         Ok(())
     }
     fn transact(&mut self, packet: impl AsRef<[u8]>) -> Result<Vec<u8>> {
+        // Verification runs between transactions, never recursively while another
+        // reply is outstanding. Urgent switch writes still interrupt either wait.
         self.dispatch_pending_switches()?;
+        self.service_retry()?;
+        self.transact_until(packet, Instant::now() + REQUEST_TIMEOUT)
+    }
+    fn transact_until(&mut self, packet: impl AsRef<[u8]>, deadline: Instant) -> Result<Vec<u8>> {
+        self.dispatch_pending_switches()?;
+        ensure!(Instant::now() < deadline, "Request expired before write");
         let mut packet = packet.as_ref().to_vec();
         if packet[1] != 0xff {
             packet[3] = (packet[3] & 0xf0) | self.next_software_id;
             self.next_software_id = 8 + (self.next_software_id + 1) % 8;
         }
         self.transport.write(&packet)?;
-        let deadline = Instant::now() + REQUEST_TIMEOUT;
         while Instant::now() < deadline {
             // The transport wake interrupts read() when a switch arrives. Do not
             // resume waiting for an unrelated reply before servicing that queue.
             self.dispatch_pending_switches()?;
-            let Some(bytes) = self
-                .transport
-                .read(Some(deadline.saturating_duration_since(Instant::now())))?
-            else {
+            let wait = Some(deadline.saturating_duration_since(Instant::now()));
+            let Some(bytes) = self.transport.read(wait)? else {
                 continue;
             };
             if let Ok(report) = Report::parse(&bytes) {
@@ -817,6 +863,8 @@ mod tests {
                 reporting_checks: BTreeSet::new(),
                 next_software_id: 8,
                 switches: crossbeam_channel::never(),
+                retries: BTreeMap::new(),
+                device_input: BTreeMap::new(),
             },
             rx,
         )
@@ -860,7 +908,163 @@ mod tests {
             epoch: 1,
             received_at: Instant::now(),
             departure: None,
+            recovery: None,
         }
+    }
+    #[test]
+    fn follower_recovery_requires_confirmed_source_identity_idle_input_and_current_handoff() {
+        use std::{collections::VecDeque, sync::atomic::AtomicBool};
+        // success, already there, wrong identity, input, newer handoff, offline
+        // cache, expired initial command, wrong source, input during verification.
+        for case in 0..11 {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut s, _events) = session(dir.path(), vec![], false);
+            let mut d = device();
+            d.id = "unit:01020304:05060708090a".into();
+            d.online = case != 5;
+            s.devices.insert(2, d.clone());
+            s.config.follow.local_computer = "computer-1".into();
+            s.config.groups.push(easy_switch_core::config::Group {
+                id: "desk".into(),
+                devices: vec![easy_switch_core::config::Member {
+                    id: d.id.clone(),
+                    channels: [("computer-1".into(), 1), ("computer-2".into(), 2)].into(),
+                    mode: easy_switch_core::config::SourceMode::Auto,
+                }],
+            });
+            let idle = Arc::new(AtomicBool::new(true));
+            let observed = idle.clone();
+            let epoch = Arc::new(AtomicU64::new(1));
+            let writes = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+            let mut ids = vec![0, 1, 2, 3, 4, 0, 0, 5, 6, 7, 8, 9, 10];
+            if case == 2 {
+                ids[1] = 9;
+            }
+            let mut frames = VecDeque::new();
+            for (feature, software, payload) in [
+                (0, 8, vec![7]),
+                (7, 9, ids),
+                (0, 10, vec![11]),
+                (
+                    11,
+                    11,
+                    vec![
+                        3,
+                        if case == 1 {
+                            1
+                        } else if case == 7 {
+                            2
+                        } else {
+                            0
+                        },
+                    ],
+                ),
+            ] {
+                let mut packet = protocol::request(2, feature, 0, &payload).unwrap().to_vec();
+                packet[3] = software;
+                frames.push_back(packet);
+            }
+            if case == 10 {
+                let mut input = protocol::request(2, 9, 2, &[0, 0xd1, 1]).unwrap().to_vec();
+                input[3] = 0x20;
+                frames.push_front(input);
+            }
+            struct VerifyTransport {
+                frames: VecDeque<Vec<u8>>,
+                writes: Arc<Mutex<Vec<Vec<u8>>>>,
+                input_on_host_reply: bool,
+                idle: Arc<AtomicBool>,
+            }
+            impl Transport for VerifyTransport {
+                fn write(&mut self, b: &[u8]) -> Result<()> {
+                    self.writes.lock().unwrap().push(b.to_vec());
+                    Ok(())
+                }
+                fn read(&mut self, _: Option<Duration>) -> Result<Option<Vec<u8>>> {
+                    let next = self.frames.pop_front();
+                    if self.input_on_host_reply && self.frames.is_empty() {
+                        self.idle.store(false, Ordering::SeqCst);
+                    }
+                    Ok(next)
+                }
+                fn waker(&self) -> Wake {
+                    Arc::new(|| {})
+                }
+            }
+            s.transport = Box::new(VerifyTransport {
+                frames,
+                writes: writes.clone(),
+                input_on_host_reply: case == 8,
+                idle: idle.clone(),
+            });
+            let mut pending = pending_switch();
+            pending.command.id = d.id;
+            if case == 6 {
+                pending.command.expires = Some(Instant::now());
+            }
+            pending.recovery = Some(RecoveryPermission {
+                activity: Arc::new(move || observed.load(Ordering::SeqCst)),
+                epoch: epoch.clone(),
+                version: 1,
+            });
+            s.dispatch_switch(pending).unwrap();
+            writes.lock().unwrap().clear();
+            if case == 3 {
+                idle.store(false, Ordering::SeqCst);
+            }
+            if case == 4 {
+                epoch.store(2, Ordering::SeqCst);
+            }
+            if case == 9 {
+                let mut input = protocol::request(2, 9, 2, &[0, 0xd1, 1]).unwrap();
+                input[3] = 0x20;
+                s.receive(&input);
+            }
+            s.retries.get_mut(&2).unwrap().due = Instant::now();
+            s.service_retry().unwrap();
+            let writes = writes.lock().unwrap();
+            let switches: Vec<_> = writes.iter().filter(|b| b[3] >> 4 == 1).collect();
+            assert_eq!(
+                switches.len(),
+                usize::from(matches!(case, 0 | 5 | 6)),
+                "case {case}"
+            );
+            if let Some(command) = switches.first() {
+                assert_eq!(command[2], 11, "Resolve fresh feature index");
+            }
+        }
+    }
+    #[test]
+    fn unreachable_follower_is_not_retried_and_verification_stops_after_two_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut s, _events) = session(dir.path(), vec![], false);
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        s.transport = Box::new(FakeTransport {
+            frames: Default::default(),
+            writes: writes.clone(),
+            fail: false,
+        });
+        s.devices.insert(2, device());
+        let mut pending = pending_switch();
+        pending.recovery = Some(RecoveryPermission {
+            activity: Arc::new(|| true),
+            epoch: Arc::new(AtomicU64::new(1)),
+            version: 1,
+        });
+        s.dispatch_switch(pending).unwrap();
+        for _ in 0..2 {
+            s.retries.get_mut(&2).unwrap().due = Instant::now();
+            s.service_retry().unwrap();
+        }
+        assert!(s.retries.is_empty());
+        assert!(s.retry_wait(None).is_none(), "Return to event-driven idle");
+        let count = writes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|b| b[3] >> 4 == 1)
+            .count();
+        assert_eq!(count, 1, "Missing replies must never cause blind switching");
     }
     #[test]
     fn cursor_departure_is_notified_only_after_successful_current_hid_write() {
@@ -989,6 +1193,7 @@ mod tests {
             epoch,
             received_at,
             departure,
+            recovery,
         } = pending_switch();
         worker
             .send(Command::Switch {
@@ -996,6 +1201,7 @@ mod tests {
                 epoch,
                 received_at,
                 departure,
+                recovery,
             })
             .unwrap();
         assert!(matches!(rx.try_recv(), Ok(Command::Refresh)));
@@ -1161,5 +1367,150 @@ mod tests {
         let start = Instant::now();
         assert!(s.feature(2, protocol::CHANGE_HOST).is_err());
         assert!(start.elapsed() < REQUEST_TIMEOUT + Duration::from_millis(250));
+    }
+}
+
+#[derive(Clone)]
+pub struct RecoveryPermission {
+    pub activity: Arc<dyn Fn() -> bool + Send + Sync>,
+    pub epoch: Arc<AtomicU64>,
+    pub version: u64,
+}
+impl RecoveryPermission {
+    fn valid(&self) -> bool {
+        self.epoch.load(Ordering::SeqCst) == self.version && (self.activity)()
+    }
+}
+struct FollowerRetry {
+    command: SwitchCommand,
+    epoch: u64,
+    permission: RecoveryPermission,
+    checks: u8,
+    input_serial: u64,
+    due: Instant,
+    until: Instant,
+}
+impl Session {
+    fn retry_wait(&self, current: Option<Duration>) -> Option<Duration> {
+        let next = self
+            .retries
+            .values()
+            .map(|r| r.due)
+            .min()
+            .map(|t| t.saturating_duration_since(Instant::now()));
+        match (current, next) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+    fn retry_valid(&self, r: &FollowerRetry) -> bool {
+        !self.paused
+            && r.epoch == self.epoch
+            && r.epoch == self.active_epoch.load(Ordering::Acquire)
+            && r.permission.valid()
+            && self.device_input.get(&r.command.slot).copied().unwrap_or(0) == r.input_serial
+            && Instant::now() < r.until
+    }
+    fn service_retry(&mut self) -> Result<()> {
+        let Some(slot) = self
+            .retries
+            .iter()
+            .find(|(_, r)| r.due <= Instant::now())
+            .map(|(slot, _)| *slot)
+        else {
+            return Ok(());
+        };
+        let mut retry = self.retries.remove(&slot).unwrap();
+        if !self.retry_valid(&retry) {
+            return Ok(());
+        }
+        let verified = self.verify_follower(&retry);
+        if !self.retry_valid(&retry) {
+            return Ok(());
+        }
+        retry.checks += 1;
+        match verified {
+            Ok(None) => return Ok(()),
+            Ok(Some(feature)) => {
+                // Fresh identity/host replies prove it is still on this source.
+                // Recheck activity and handoff generation immediately before writing.
+                if !self.retry_valid(&retry) {
+                    return Ok(());
+                }
+                let result = self.transport.write(&protocol::request(
+                    slot,
+                    feature,
+                    1,
+                    &[retry.command.target],
+                )?);
+                self.message(format!(
+                    "Follower recovery {} for {} (transaction {}): {}",
+                    retry.checks,
+                    retry.command.id,
+                    retry.command.transaction.as_deref().unwrap_or("unknown"),
+                    match result {
+                        Ok(()) => "switch resent after confirming source host and no input".into(),
+                        Err(error) => format!("{error:#}"),
+                    }
+                ));
+            }
+            Err(e) => {
+                tracing::debug!(slot, error=%e, "Follower location unknown; no recovery write")
+            }
+        }
+        if retry.checks < 2 {
+            retry.due = Instant::now() + Duration::from_millis(750);
+            // An urgent newer switch may have installed a replacement during the query.
+            self.retries.entry(slot).or_insert(retry);
+        }
+        Ok(())
+    }
+    fn verify_follower(&mut self, r: &FollowerRetry) -> Result<Option<u8>> {
+        let slot = r.command.slot;
+        let deadline = Instant::now() + Duration::from_millis(200);
+        let mut call = |feature, function, params: &[u8]| -> Result<Vec<u8>> {
+            self.transact_until(
+                protocol::request(slot, feature, function, params)?,
+                deadline,
+            )
+        };
+        let ids_index = call(0, 0, &3u16.to_be_bytes())?;
+        let ids_index = *ids_index
+            .first()
+            .filter(|i| **i != 0)
+            .context("Identity feature unavailable")?;
+        let ids = call(ids_index, 0, &[])?;
+        ensure!(ids.len() >= 13, "Truncated device identity");
+        let hex = |b: &[u8]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        ensure!(
+            format!("unit:{}:{}", hex(&ids[1..5]), hex(&ids[7..13])) == r.command.id,
+            "Receiver slot identity changed"
+        );
+        let feature = call(0, 0, &protocol::CHANGE_HOST.to_be_bytes())?;
+        let feature = *feature
+            .first()
+            .filter(|i| **i != 0)
+            .context("ChangeHost unavailable")?;
+        let host = call(feature, 0, &[])?;
+        ensure!(
+            host.len() >= 2
+                && (1..=3).contains(&host[0])
+                && host[1] < host[0]
+                && r.command.target < host[0],
+            "Invalid host response"
+        );
+        if host[1] == r.command.target {
+            return Ok(None);
+        }
+        let source = self
+            .config
+            .member(&r.command.id)
+            .and_then(|m| m.channels.get(&self.config.follow.local_computer))
+            .context("Source host unmapped")?;
+        ensure!(
+            host[1] + 1 == *source,
+            "Device not confirmed on source host"
+        );
+        Ok(Some(feature))
     }
 }

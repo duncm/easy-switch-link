@@ -96,6 +96,7 @@ pub fn run(paths: Paths, headless: bool, diagnostics: bool) -> Result<()> {
         generation: 1,
         follow: None,
         follow_generation: 1,
+        edge_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
         ambiguous: std::collections::BTreeSet::new(),
         events: events_tx,
         retry: None,
@@ -160,6 +161,7 @@ struct Monitor {
     follow_tx: crossbeam_channel::Sender<crate::follow::Dispatch>,
     follow: Option<crate::follow::Manager>,
     follow_generation: u64,
+    edge_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ambiguous: std::collections::BTreeSet<String>,
     journal: std::sync::Arc<receiver::Journal>,
     engine: Engine,
@@ -176,8 +178,11 @@ struct Monitor {
 impl Monitor {
     fn ensure_follow(&mut self) -> Result<()> {
         if self.follow.is_none() {
-            let manager =
-                crate::follow::Manager::start(self.paths.clone(), self.follow_tx.clone())?;
+            let manager = crate::follow::Manager::start(
+                self.paths.clone(),
+                self.follow_tx.clone(),
+                self.events.clone(),
+            )?;
             manager.send(crate::follow::Command::Update(crate::follow::Local {
                 config: self.engine.config.clone(),
                 devices: self.engine.devices.values().cloned().collect(),
@@ -256,12 +261,10 @@ impl Monitor {
             member.channels.contains_key(&request.rule.computer),
             "Mouse destination unmapped"
         );
-        let (mut commands, errors) = self.engine.plan(
-            &request.rule.group,
-            &request.rule.computer,
-            None,
-            Instant::now(),
-        );
+        let (mut commands, errors) =
+            self.engine
+                .plan_edge(&request.rule.group, &request.rule.computer, Instant::now());
+        let recovery_epoch = self.edge_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         commands.sort_by_key(|c| c.id == request.rule.mouse);
         ensure!(
             commands.iter().any(|c| c.id == request.rule.mouse),
@@ -274,6 +277,21 @@ impl Monitor {
             command.expires = Some(request.deadline);
             command.transaction = Some(request.transaction.clone());
             let primary = command.id == request.rule.mouse;
+            let recovery = if primary {
+                None
+            } else {
+                request
+                    .desktop
+                    .as_ref()
+                    .and_then(|desktop| {
+                        desktop.retry_guard(&self.engine.devices.get(&command.id)?.kind)
+                    })
+                    .map(|activity| receiver::RecoveryPermission {
+                        activity: std::sync::Arc::new(move || activity.valid()),
+                        epoch: self.edge_epoch.clone(),
+                        version: recovery_epoch,
+                    })
+            };
             let Some(worker) = self.workers.get(&command.receiver) else {
                 if primary {
                     anyhow::bail!("Primary mouse receiver disappeared");
@@ -286,6 +304,7 @@ impl Monitor {
                 command,
                 epoch,
                 received_at: request.at,
+                recovery,
                 departure: request.desktop.clone().filter(|_| primary).map(|desktop| {
                     let crossing = request.at;
                     Box::new(move |written| {
@@ -338,6 +357,7 @@ impl Monitor {
         }
     }
     fn invalidate(&mut self) {
+        self.edge_epoch.fetch_add(1, Ordering::SeqCst);
         for worker in self.workers.values() {
             worker.epoch.fetch_add(1, Ordering::AcqRel);
         }
@@ -415,6 +435,26 @@ impl Monitor {
     }
     fn event(&mut self, event: Event) {
         match event {
+            Event::LayoutConfig { generation, config } => {
+                if generation != self.follow_generation {
+                    return;
+                }
+                if let Err(error) = self.paths.save(&config) {
+                    self.message(format!(
+                        "Could not retain automatic layout verification: {error:#}"
+                    ));
+                    return;
+                }
+                self.engine.replace_config(config);
+                if let Err(error) = self.configure() {
+                    self.message(format!("Layout configuration update: {error:#}"));
+                } else {
+                    self.message(
+                        "Automatically verified updated layouts for known display identities"
+                            .into(),
+                    );
+                }
+            }
             Event::Message(message) => self.message(message),
             Event::Conflict(id, session, name) => {
                 if !self.current_session(&id, session) {
@@ -518,6 +558,7 @@ impl Monitor {
         commands: Vec<easy_switch_core::engine::SwitchCommand>,
         received_at: Instant,
     ) {
+        self.edge_epoch.fetch_add(1, Ordering::SeqCst);
         for command in commands {
             if let Some(worker) = self.workers.get(&command.receiver) {
                 let epoch = worker.epoch.load(Ordering::Acquire);
@@ -526,6 +567,7 @@ impl Monitor {
                     epoch,
                     received_at,
                     departure: None,
+                    recovery: None,
                 }) {
                     self.message(format!("Switch not queued: {e:#}"));
                 }
@@ -674,6 +716,7 @@ mod tests {
             retry_count: 0,
             follow: None,
             follow_generation: 1,
+            edge_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             ambiguous: Default::default(),
         };
         monitor.event(Event::Lost("bolt".into(), 1, "stale disconnect".into()));

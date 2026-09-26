@@ -179,6 +179,7 @@ pub fn start(
     mut commands: mpsc::Receiver<Command>,
     events: crossbeam_channel::Sender<Event>,
     private_dir: std::path::PathBuf,
+    activity: Arc<InputActivity>,
 ) -> Result<Arc<dyn Fn() + Send + Sync>> {
     let (mut read, write) = UnixStream::pair()?;
     read.set_nonblocking(true)?;
@@ -188,6 +189,7 @@ pub fn start(
         .name("x11-edges".into())
         .spawn(move || {
             let mut model = Model::new("X11 XInput2/XFixes", events);
+            model.activity = activity;
             let result = (|| -> Result<()> {
                 model.load_bindings(&private_dir)?;
                 let (c, screen) = x11rb::connect(None)?;
@@ -238,6 +240,7 @@ pub fn start(
                             Command::Authorize => {}
                             Command::Restore(reply) => {
                                 model.cursor.restore();
+                                model.latch.reset();
                                 sync_cursor(&c, root, &mut model)?;
                                 let _ = reply.send(());
                             }
@@ -253,6 +256,7 @@ pub fn start(
                             }
                             Command::Configure { enabled, rules } => {
                                 model.cursor.restore();
+                                model.latch.reset();
                                 model.enabled = enabled;
                                 model.rules = rules;
                                 if !enabled {
@@ -333,27 +337,24 @@ pub fn start(
                                         }
                                     }
                                 }
+                                model.activity.input(false, true);
                                 model.movement(p, delta, buttons, false);
                             }
                             XEvent::XinputRawKeyPress(e) | XEvent::XinputRawKeyRelease(e) => {
                                 if e.response_type & 0x80 == 0 && !injected.contains(&e.sourceid) {
+                                    model.activity.input(true, false);
                                     model.input();
                                 }
                             }
                             XEvent::XinputRawButtonPress(e) | XEvent::XinputRawButtonRelease(e) => {
                                 if e.response_type & 0x80 == 0 && !injected.contains(&e.sourceid) {
+                                    model.activity.input(false, true);
                                     model.input();
                                 }
                             }
                             XEvent::XinputBarrierHit(e) => {
-                                let (p, buttons) = pointer(&c, root)?;
-                                let delta = Point {
-                                    x: e.dx.integral as f64 + e.dx.frac as f64 / 4294967296.0,
-                                    y: e.dy.integral as f64 + e.dy.frac as f64 / 4294967296.0,
-                                };
-                                if e.response_type & 0x80 == 0 && !injected.contains(&e.sourceid) {
-                                    model.movement(p, delta, buttons, false);
-                                }
+                                // XI raw motion carries the same physical movement. Counting
+                                // BarrierHit too would double the pressure at XFixes barriers.
                                 c.xinput_xi_barrier_release_pointer(&[
                                     BarrierReleasePointerInfo {
                                         deviceid: e.deviceid,
@@ -396,6 +397,7 @@ pub fn start(
                     );
                 }
             })();
+            model.activity.available(false);
             if let Err(e) = result {
                 model.unavailable(format!("X11 unavailable: {e:#}"));
             }
@@ -406,8 +408,12 @@ pub fn start(
 }
 
 fn sync_cursor(c: &RustConnection, root: Window, model: &mut Model) -> Result<()> {
+    model
+        .activity
+        .available(model.enabled && model.state.ready && !model.state.locked);
     if model.state.locked || !model.enabled || !model.state.ready {
         model.cursor.restore();
+        model.latch.reset();
     }
     let hidden = model.cursor.hidden;
     if hidden != model.state.cursor_hidden {

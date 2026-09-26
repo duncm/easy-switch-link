@@ -33,6 +33,31 @@ mod tests {
     use super::*;
     use easy_switch_core::follow::{Display, Edge};
     #[test]
+    fn recovery_input_guards_cancel_on_relevant_input_and_new_handoffs() {
+        let activity = Arc::new(InputActivity::default());
+        assert!(activity.guard("keyboard").is_none());
+        activity.available(true);
+        let keyboard = activity.guard("keyboard").unwrap();
+        let mouse = activity.guard("mouse").unwrap();
+        activity.input(false, true);
+        assert!(
+            keyboard.valid(),
+            "Mouse movement must not cancel a keyboard retry"
+        );
+        assert!(!mouse.valid());
+        activity.input(true, false);
+        assert!(!keyboard.valid());
+        let guard = activity.guard("keyboard").unwrap();
+        activity.cancel();
+        assert!(
+            !guard.valid(),
+            "Arrival/configuration/new handoff cancels old retries"
+        );
+        let guard = activity.guard("other").unwrap();
+        activity.input(true, true);
+        assert!(!guard.valid());
+    }
+    #[test]
     fn departure_requires_current_crossing_and_success_before_new_input() {
         let at = Instant::now();
         let written = at + Duration::from_millis(30);
@@ -125,6 +150,87 @@ mod tests {
         (model, rx, s)
     }
     #[test]
+    fn buffer_scales_on_all_four_edges_and_fast_contact_does_not_trigger() {
+        for edge in Edge::ALL {
+            let (mut m, rx, _) = fixture();
+            m.state.displays[0].scale = 2.0;
+            m.rules[0].source.edge = edge;
+            let (p, delta) = match edge {
+                Edge::Left => (
+                    Point {
+                        x: -1000.0,
+                        y: 400.0,
+                    },
+                    Point { x: -12.0, y: 0.0 },
+                ),
+                Edge::Right => (Point { x: -1.0, y: 400.0 }, Point { x: 12.0, y: 0.0 }),
+                Edge::Top => (Point { x: -500.0, y: 0.0 }, Point { x: 0.0, y: -12.0 }),
+                Edge::Bottom => (
+                    Point {
+                        x: -500.0,
+                        y: 799.0,
+                    },
+                    Point { x: 0.0, y: 12.0 },
+                ),
+            };
+            m.movement(
+                p,
+                Point {
+                    x: delta.x * 100.0,
+                    y: delta.y * 100.0,
+                },
+                false,
+                false,
+            );
+            assert!(rx.is_empty(), "Fast approach is not pressure: {edge:?}");
+            m.movement(p, delta, false, false);
+            assert!(rx.is_empty(), "Half a buffer: {edge:?}");
+            m.movement(p, delta, false, false);
+            assert!(matches!(rx.try_recv(), Ok(Event::Cross { .. })), "{edge:?}");
+        }
+    }
+    #[test]
+    fn inward_motion_buttons_and_synthetic_motion_discard_partial_pressure() {
+        for mode in 0..3 {
+            let (mut m, rx, _) = fixture();
+            let p = Point { x: -1.0, y: 400.0 };
+            m.state.pointer = p;
+            m.movement(p, Point { x: 8.0, y: 0.0 }, false, false);
+            m.movement(
+                p,
+                Point {
+                    x: if mode == 0 { -1.0 } else { 1.0 },
+                    y: 0.0,
+                },
+                mode == 1,
+                mode == 2,
+            );
+            m.movement(p, Point { x: 4.0, y: 0.0 }, false, false);
+            assert!(rx.is_empty());
+            m.movement(p, Point { x: 8.0, y: 0.0 }, false, false);
+            assert!(matches!(rx.try_recv(), Ok(Event::Cross { .. })));
+        }
+    }
+    #[test]
+    fn pressure_can_continue_across_an_internal_display_seam() {
+        let (mut m, rx, _) = fixture();
+        m.state.pointer = Point { x: -10.0, y: 400.0 };
+        for (x, dx) in [(5.0, 15.0), (10.0, 5.0)] {
+            m.movement(Point { x, y: 400.0 }, Point { x: dx, y: 0.0 }, false, false);
+            assert!(rx.is_empty());
+        }
+        m.movement(
+            Point { x: 12.0, y: 400.0 },
+            Point { x: 2.0, y: 0.0 },
+            false,
+            false,
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Event::Cross { fraction: 0.5, .. })
+        ));
+    }
+    #[test]
     fn synthetic_buttons_paused_and_locked_do_not_cross() {
         for mode in 0..4 {
             let (mut m, rx, _) = fixture();
@@ -146,6 +252,20 @@ mod tests {
     #[test]
     fn single_crossing_then_bounce_is_suppressed() {
         let (mut m, rx, _) = fixture();
+        m.movement(
+            Point { x: -1.0, y: 400.0 },
+            Point { x: 5.0, y: 0.0 },
+            false,
+            false,
+        );
+        assert!(rx.is_empty(), "Merely reaching the edge must not switch");
+        m.movement(
+            Point { x: -1.0, y: 400.0 },
+            Point { x: 7.0, y: 0.0 },
+            false,
+            false,
+        );
+        assert!(rx.is_empty());
         m.movement(
             Point { x: -1.0, y: 400.0 },
             Point { x: 5.0, y: 0.0 },
@@ -267,14 +387,27 @@ pub enum Command {
 }
 #[derive(Clone)]
 pub struct Handle {
+    activity: Arc<InputActivity>,
     tx: mpsc::Sender<Command>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 impl Handle {
+    pub fn retry_guard(&self, kind: &str) -> Option<RetryGuard> {
+        self.activity.guard(kind)
+    }
+    pub fn cancel_retries(&self) {
+        self.activity.cancel();
+    }
     pub fn is_closed(&self) -> bool {
         self.tx.is_closed()
     }
     pub fn send(&self, c: Command) -> Result<()> {
+        if !matches!(
+            c,
+            Command::Depart { .. } | Command::Complete(_) | Command::Authorize
+        ) {
+            self.activity.cancel();
+        }
         self.tx
             .try_send(c)
             .map_err(|_| anyhow::anyhow!("Desktop command queue unavailable"))?;
@@ -304,15 +437,16 @@ pub fn start(
     _private_dir: std::path::PathBuf,
 ) -> Result<Handle> {
     let (tx, rx) = mpsc::channel(32);
+    let activity = Arc::new(InputActivity::default());
     #[cfg(windows)]
-    let wake = native::start(rx, events, _private_dir)?;
+    let wake = native::start(rx, events, _private_dir, activity.clone())?;
     #[cfg(target_os = "linux")]
     let wake = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        wayland::start(rx, events, _private_dir)?
+        wayland::start(rx, events, _private_dir, activity.clone())?
     } else {
-        x11::start(rx, events, _private_dir)?
+        x11::start(rx, events, _private_dir, activity.clone())?
     };
-    let handle = Handle { tx, wake };
+    let handle = Handle { tx, wake, activity };
     #[cfg(target_os = "linux")]
     session_watch::start(handle.clone());
     Ok(handle)
@@ -324,6 +458,7 @@ struct Reservation {
     until: Instant,
 }
 pub(super) struct Model {
+    activity: Arc<InputActivity>,
     cursor: CursorVisibility,
     bindings: Option<Bindings>,
     pub state: DesktopState,
@@ -339,6 +474,7 @@ pub(super) struct Model {
 impl Model {
     fn new(backend: &str, events: crossbeam_channel::Sender<Event>) -> Self {
         Self {
+            activity: Arc::default(),
             cursor: CursorVisibility::default(),
             bindings: None,
             state: DesktopState {
@@ -371,7 +507,9 @@ impl Model {
         Ok(())
     }
     fn topology(&mut self, mut displays: Vec<easy_switch_core::follow::Display>) {
+        self.activity.cancel();
         self.cursor.restore();
+        self.latch.reset();
         displays.sort_by(|a, b| a.id.cmp(&b.id));
         if !displays.iter().all(|d| d.valid()) || displays.windows(2).any(|d| d[0].id == d[1].id) {
             self.state.ready = false;
@@ -413,15 +551,18 @@ impl Model {
         let previous = self.state.pointer;
         self.state.pointer = p;
         if synthetic {
+            self.latch.reset();
             return;
         }
         self.input();
+        let now = Instant::now();
         if !self.enabled
             || !self.state.ready
             || self.state.locked
             || buttons
-            || !self.latch.eligible(p, Instant::now())
+            || !self.latch.eligible(now)
         {
+            self.latch.reset();
             return;
         }
         let hits: Vec<_> = self
@@ -430,26 +571,43 @@ impl Model {
             .filter(|r| r.enabled)
             .filter_map(|r| {
                 self.state.displays.iter().find_map(|d| {
-                    let fraction = if r.source.hit(d, p, delta) {
-                        r.source.fraction(d, p)
+                    let outward = r.source.edge.outward(delta);
+                    if outward <= 0.0 || !outward.is_finite() {
+                        return None;
+                    }
+                    let crossing = r.source.crossing(d, previous, p);
+                    let continuing = self.latch.pending(&r.id, now)
+                        && d.id == r.source.display
+                        && d.binding == r.source.binding
+                        && d.inward(r.source.edge, p) <= 1.1;
+                    if !r.source.hit(d, p, delta) && crossing.is_none() && !continuing {
+                        return None;
+                    }
+                    let fraction = r.source.fraction(d, p).or(crossing)?;
+                    let before = d.inward(r.source.edge, previous);
+                    let distance = if before <= 1.1 && (before >= -1.0 || continuing) {
+                        outward
                     } else {
-                        r.source.crossing(d, previous, p)
-                    };
-                    fraction.map(|f| (r, d, f))
+                        // A fast approach to a clamped outer edge isn't pressure.
+                        // At an internal seam, only the actual overshoot counts.
+                        (-d.inward(r.source.edge, p)).max(0.0)
+                    } / d.scale;
+                    Some((r, fraction, distance))
                 })
             })
             .collect();
-        if let [(rule, d, fraction)] = hits.as_slice() {
-            let at = Instant::now();
-            self.cursor.crossing = Some(at);
-            self.latch
-                .block((*d).clone(), rule.source.edge, Instant::now());
-            let _ = self.events.try_send(Event::Cross {
-                rule: rule.id.clone(),
-                fraction: *fraction,
-                generation: self.state.generation,
-                at,
-            });
+        if let [(rule, fraction, distance)] = hits.as_slice() {
+            if self.latch.push(&rule.id, *distance, now) {
+                self.cursor.crossing = Some(now);
+                let _ = self.events.try_send(Event::Cross {
+                    rule: rule.id.clone(),
+                    fraction: *fraction,
+                    generation: self.state.generation,
+                    at: now,
+                });
+            }
+        } else {
+            self.latch.reset();
         }
     }
     fn placement(&mut self, s: &Segment, f: f64, generation: u64) -> Result<(u64, Point)> {
@@ -482,7 +640,7 @@ impl Model {
             serial: self.state.input_serial,
             until: Instant::now() + Duration::from_secs(5),
         });
-        self.latch.block(d.clone(), s.edge, Instant::now());
+        self.latch.block(Instant::now());
         Ok((self.sequence, p))
     }
     fn cancel(&mut self, id: u64) -> Option<Point> {
@@ -577,5 +735,74 @@ impl Bindings {
             }
         }
         Ok(())
+    }
+}
+
+/// Raw receiver collections cannot always identify a paired unit. Activity from
+/// *any* keyboard cancels keyboard retries; any pointer cancels pointer retries.
+/// Unknown devices cancel both. Wayland cannot observe uncaptured keyboard input,
+/// so no guard is issued there. Counters contain no key/button content.
+#[derive(Default)]
+pub(super) struct InputActivity {
+    available: std::sync::atomic::AtomicBool,
+    generation: std::sync::atomic::AtomicU64,
+    keyboard: std::sync::atomic::AtomicU64,
+    pointer: std::sync::atomic::AtomicU64,
+}
+#[derive(Clone)]
+pub struct RetryGuard {
+    activity: Arc<InputActivity>,
+    generation: u64,
+    keyboard: Option<u64>,
+    pointer: Option<u64>,
+}
+impl InputActivity {
+    fn cancel(&self) {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn input(&self, keyboard: bool, pointer: bool) {
+        if keyboard {
+            self.keyboard
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        if pointer {
+            self.pointer
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    fn available(&self, value: bool) {
+        if self
+            .available
+            .swap(value, std::sync::atomic::Ordering::SeqCst)
+            != value
+        {
+            self.cancel();
+        }
+    }
+    fn guard(self: &Arc<Self>, kind: &str) -> Option<RetryGuard> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if !self.available.load(SeqCst) {
+            return None;
+        }
+        Some(RetryGuard {
+            activity: self.clone(),
+            generation: self.generation.load(SeqCst),
+            keyboard: (kind != "mouse").then(|| self.keyboard.load(SeqCst)),
+            pointer: (kind != "keyboard").then(|| self.pointer.load(SeqCst)),
+        })
+    }
+}
+impl RetryGuard {
+    pub fn valid(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.activity.available.load(SeqCst)
+            && self.activity.generation.load(SeqCst) == self.generation
+            && self
+                .keyboard
+                .is_none_or(|v| self.activity.keyboard.load(SeqCst) == v)
+            && self
+                .pointer
+                .is_none_or(|v| self.activity.pointer.load(SeqCst) == v)
     }
 }

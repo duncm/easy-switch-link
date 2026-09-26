@@ -172,6 +172,7 @@ fn fixture() -> (
         expires: Instant::now() + Duration::from_secs(60),
     };
     let s = Shared {
+        monitor_events: crossbeam_channel::bounded(16).0,
         paths: Paths::new(Some(dir.path().into())).unwrap(),
         id: "local".into(),
         gate: Arc::new(Mutex::new(Gate::default())),
@@ -317,4 +318,39 @@ fn pairing_requires_both_confirmations_and_valid_deadline() {
     finish_pair(&mut s, "peer").unwrap();
     assert!(s.trust.contains_key("peer"));
     assert!(s.gate.lock().unwrap().pins.contains("peer"));
+}
+
+#[test]
+fn automatic_layout_verification_only_uses_matching_trusted_computers() {
+    let (_dir, state, _, _) = fixture();
+    let (tx, updates) = crossbeam_channel::bounded(8);
+    let mut s = state.lock().unwrap();
+    s.monitor_events = tx;
+    let display = s.desktop_state.displays[0].clone();
+    s.local.config.follow.rules[0].source = Segment {
+        display: display.id.clone(),
+        binding: "old-local".into(),
+        ..Default::default()
+    };
+    s.local.config.follow.rules[0].destination = Segment {
+        display: display.id.clone(),
+        binding: "old-remote".into(),
+        ..Default::default()
+    };
+    s.peers.get_mut("peer").unwrap().status.displays = vec![display.clone()];
+    s.refresh_layouts();
+    let crate::receiver::Event::LayoutConfig { generation, config } = updates.recv().unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(generation, s.local.generation);
+    assert_eq!(config.follow.rules[0].source.binding, display.binding);
+    assert_eq!(config.follow.rules[0].destination.binding, display.binding);
+    s.local.config = config;
+    s.refresh_layouts();
+    assert!(updates.is_empty(), "No repeated configuration writes");
+    s.peers.get_mut("peer").unwrap().status.displays[0].binding = "another-layout".into();
+    s.trust.clear();
+    s.refresh_layouts();
+    assert!(updates.is_empty(), "Untrusted peers cannot rebind rules");
 }

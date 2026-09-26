@@ -26,18 +26,32 @@ edges. For example, the bottom two-thirds is **33.333333–100%**. A crossing ha
 through that segment enters halfway through the chosen destination segment.
 Arrival is eight logical pixels inside the destination display.
 
-Windows and X11 suppress crossings during mouse-button drags and require a
-500 ms cooldown plus 16 logical pixels of inward movement before another edge
-activation. Wayland uses the explicitly approved alternative: a 500 ms cooldown
-and eight-pixel arrival inset, because the standard portal cannot observe ordinary
-pointer movement while capture is inactive. Ambiguous corner crossings are ignored.
+Edge switching requires a small outward push beyond the boundary: **12 units of
+relative mouse motion**, normalized by display scale. Merely reaching the edge,
+including a fast approach from inside the display, does not switch. At an internal
+monitor seam, only motion beyond that seam counts. Raw mouse sensitivity and OS
+acceleration affect how this feels; the threshold is not an exact physical distance.
+
+Pressure resets when the pointer reverses, leaves the segment, changes rules,
+pauses for 250 ms, or when buttons are held, synthetic motion occurs, settings
+change or the desktop locks. The old 16-pixel inward-movement requirement has been
+removed, and the 500 ms cooldown is now **80 ms**. After this brief duplicate-event
+guard, a fresh push can switch back immediately. Arrival remains eight logical
+pixels inside the destination display. Ambiguous corner crossings are ignored.
+
+On Wayland, the portal temporarily captures real EIS pointer motion to measure
+the push. Capture is released as soon as the threshold is reached, movement
+reverses, buttons are held, a control command arrives, or after 200 ms. It does
+not synthesize a push from an edge-activation notification. This timeout bounds
+capture; it is not a dwell requirement or an added delay once enough motion arrives.
 
 An unavailable, paused or locked peer, stale display binding, permission denial,
 or missed readiness deadline leaves the devices on the source computer. The
 destination has at most 500 ms to acknowledge cursor placement. Commands enter
 the existing priority HID queues with a 100 ms expiry; the primary mouse is queued
 after followers. Different receiver workers may execute concurrently. Hardware
-switches are not atomic: a partial failure is reported without automatic rollback.
+switches are not atomic. Idle followers may receive bounded recovery attempts as
+described below; the primary mouse is never rolled back.
 
 ## Desktop support
 
@@ -63,8 +77,11 @@ on cancellation when absence of intervening local input cannot be established.
 See [InputCapture](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.InputCapture.html)
 and [RemoteDesktop](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html).
 
-If a display is absent or its geometry/binding changes, reselect and verify it in
-settings. Never select a different display merely to clear a diagnostic. Headless
+Geometry and binding changes are now automatically verified for the same unique
+display ID, locally and on previously paired computers. Updated bindings are saved
+atomically; segment percentages and chosen displays are preserved. Missing or
+ambiguous display identities still need attention in settings; another monitor
+is never substituted. Headless
 HID service operation works without these desktop capabilities; edge switching
 needs the session's `DISPLAY`/`XAUTHORITY` or `WAYLAND_DISPLAY` and session D-Bus.
 For a systemd user service, import the graphical environment at login:
@@ -145,3 +162,32 @@ visibility support and whether this instance has hidden the cursor.
 Open **About** from Settings or the tray, or run `easy-switch-link about`, to
 see the executable's version and license. The standalone About window works
 without starting the monitor.
+
+## Rapid handoff follower recovery (0.2.3)
+
+Edge dispatch includes known mapped followers even when their cached connection
+or host state is stale. Followers are queued before the primary mouse. On Windows
+and X11, a missed follower gets up to two follow-up verification attempts, starting
+250 ms after dispatch and then 750 ms after the preceding check, within a
+three-second recovery window. Each verification has a 200 ms request budget and
+uses the existing receiver owner, yielding to urgent switch writes.
+
+A resend requires fresh HID++ replies confirming the stable unit identity and
+that its selected host is still this source computer. Feature indices are resolved
+again. A missing reply, a different unit in the slot, or an unexpected host never
+causes a blind resend. Expired initial commands and reconnecting cached followers
+can recover through the same path. Normal idle operation still does no polling.
+
+Any input from the relevant class of device cancels recovery: keyboard input for
+keyboards, pointer input for mice, either for other/unknown device types. This is
+conservative because receiver input collections do not always distinguish paired
+units. Moving the mouse does not cancel an idle keyboard's retry. Activity is
+checked again after verification and immediately before a resend; no key or button
+contents are retained. HID++ control notifications also cancel that device's
+recovery, including Easy-Switch keys that bypass ordinary OS keyboard events.
+New edge/manual switches, incoming handoffs, pause,
+configuration changes, session lock, receiver removal, and destination loss cancel
+superseded recovery. On Wayland the standard portal cannot prove keyboard inactivity
+outside capture, so automatic retries are disabled there rather than moving a
+device that may have been used locally. Recovery is bounded and cannot guarantee
+radio arrival for an unreachable device.

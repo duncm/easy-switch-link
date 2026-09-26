@@ -79,6 +79,7 @@ impl Editor {
         if !follow.message.is_empty() {
             ui.label(&follow.message);
         }
+        ui.small("Push beyond an edge to switch; touching it is not enough.");
         preview(ui, &follow.desktop.displays);
         for peer in &follow.peers {
             ui.horizontal_wrapped(|ui| {

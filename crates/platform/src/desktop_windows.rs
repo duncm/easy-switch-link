@@ -140,6 +140,10 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
                         )
                     };
                     if count >= size_of::<RAWINPUTHEADER>() as u32 && count != u32::MAX {
+                        state.model.activity.input(
+                            input.header.dwType != RIM_TYPEMOUSE.0,
+                            input.header.dwType != RIM_TYPEKEYBOARD.0,
+                        );
                         state.model.input();
                     }
                     if count != u32::MAX
@@ -204,6 +208,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
                         match c {
                             Command::Restore(reply) => {
                                 state.model.cursor.restore();
+                                state.model.latch.reset();
                                 state.cursor.sync(&mut state.model);
                                 let _ = reply.send(());
                             }
@@ -212,6 +217,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
                             }
                             Command::Configure { enabled, rules } => {
                                 state.model.cursor.restore();
+                                state.model.latch.reset();
                                 state.model.enabled = enabled;
                                 state.model.rules = rules;
                                 if !enabled {
@@ -260,6 +266,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
                             Command::Complete(id) => state.model.complete(id),
                             Command::Stop => {
                                 state.model.cursor.restore();
+                                state.model.latch.reset();
                                 unsafe { PostQuitMessage(0) };
                             }
                         }
@@ -269,7 +276,11 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
             }
             if state.model.state.locked || !state.model.enabled {
                 state.model.cursor.restore();
+                state.model.latch.reset();
             }
+            state.model.activity.available(
+                state.model.enabled && state.model.state.ready && !state.model.state.locked,
+            );
             state.cursor.sync(&mut state.model);
         }
     });
@@ -279,6 +290,7 @@ pub fn start(
     commands: mpsc::Receiver<Command>,
     events: crossbeam_channel::Sender<Event>,
     private_dir: std::path::PathBuf,
+    activity: Arc<InputActivity>,
 ) -> Result<Arc<dyn Fn() + Send + Sync>> {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
@@ -322,6 +334,7 @@ pub fn start(
                     )?;
                     WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION)?;
                     let mut model = Model::new("Windows Raw Input", events.clone());
+                    model.activity = activity;
                     model.load_bindings(&private_dir)?;
                     model.state.ready = true;
                     model.state.locked = !active_desktop();
@@ -342,7 +355,9 @@ pub fn start(
                         DispatchMessageW(&message);
                     }
                     LOOP.with(|s| {
-                        s.borrow_mut().take();
+                        if let Some(s) = s.borrow_mut().take() {
+                            s.model.activity.available(false);
+                        }
                     });
                     let _ = WTSUnRegisterSessionNotification(window);
                     let _ = DestroyWindow(window);

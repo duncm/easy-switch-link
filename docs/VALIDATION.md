@@ -258,3 +258,36 @@ trigger behavior must not be represented as proven device compatibility.
   are visible, with no clipped text. These builds have not been installed on the
   paired hardware; package upgrade and physical round-trip checks remain pending.
 - Prior 0.2.0 timing/resource measurements do not measure this update.
+
+## 0.2.2 edge buffer
+
+- Windows x64 and Linux amd64: all 52 unit/simulation tests pass.
+- Automated coverage includes all four edges, DPI scaling, fast approach without
+  pressure, accumulation past internal monitor seams, direction reversal, held
+  buttons, synthetic motion, rule changes, idle gaps, and fresh reverse crossings
+  after 80 ms without an inward detour. X11 no longer counts both raw motion and
+  the duplicate barrier-hit notification toward the buffer.
+- Wayland measures actual EIS motion during bounded capture, rather than treating
+  activation as a synthetic outward push. Portal interaction remains unverified
+  on physical GNOME/KDE Wayland desktops.
+- Physical test-alpha/test-bravo crossings, perceived buffer sensitivity, and resource
+  measurements have not been revalidated for this update. Builds are not installed
+  automatically on those computers.
+
+## 0.2.3 rapid handoffs and automatic layout verification
+
+- Windows x64 and Linux amd64: all 58 tests and strict workspace Clippy pass.
+- Windows 0.2.2 logs confirmed repeated edge dispatches that listed the keyboard
+  as unavailable and sent only the mouse. This establishes a stale-availability
+  failure path; it does not prove every reported miss has the same cause.
+- Tests cover stale/offline followers across repeated handoffs, expired initial
+  writes, fresh feature indices, stable identity checks, source-host confirmation,
+  already-switched devices, input before/during verification, superseding handoffs,
+  bounded no-reply checks, direct HID++ control input before/during verification,
+  and event-driven idle after recovery ends.
+- Layout tests preserve display identity and segment mapping, reject missing or
+  ambiguous IDs, and refuse updates from untrusted peers. Updates carry the source
+  configuration generation so stale proposals cannot overwrite newer settings.
+- Actual 0.2.3 rapid Bolt round trips, retry timing, per-class input cancellation,
+  and live display hotplug/rebinding have not been hardware-validated. Wayland
+  automatic retries are disabled because global idle input cannot be established.

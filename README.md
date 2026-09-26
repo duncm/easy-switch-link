@@ -8,6 +8,12 @@ when closed. The monitor waits for HID and OS events; it does not poll idle devi
 
 ## Destination follows mouse
 
+Version 0.2.3 recovers idle followers missed during rapid edge handoffs and
+automatically verifies layout changes for known displays on paired computers.
+
+Version 0.2.2 adds a small outward-push edge buffer and reduces the bounce-back
+cooldown to 80 ms, with no inward-movement requirement.
+
 Version 0.2.1 hides the source cursor after mouse-edge handoffs on Windows/X11,
 restores it on local physical input or return, and adds an About screen with the
 application version (Settings, tray, or `easy-switch-link about`).
@@ -23,9 +29,9 @@ Download the appropriate artifact from `dist/` or the project's release artifact
 
 | Platform | Portable | Installer |
 | --- | --- | --- |
-| Windows 10/11 x64 | `easy-switch-link-0.2.1-windows-x64.exe` | `easy-switch-link-0.2.1-windows-x64.msi` |
-| Linux amd64 | `easy-switch-link-0.2.1-linux-amd64` | `easy-switch-link_0.2.1_amd64.deb` |
-| Linux arm64 | `easy-switch-link-0.2.1-linux-arm64` | `easy-switch-link_0.2.1_arm64.deb` |
+| Windows 10/11 x64 | `easy-switch-link-0.2.3-windows-x64.exe` | `easy-switch-link-0.2.3-windows-x64.msi` |
+| Linux amd64 | `easy-switch-link-0.2.3-linux-amd64` | `easy-switch-link_0.2.3_amd64.deb` |
+| Linux arm64 | `easy-switch-link-0.2.3-linux-arm64` | `easy-switch-link_0.2.3_arm64.deb` |
 
 1. Pair your devices to each computer using Logitech's normal pairing procedure.
    Each participating computer needs a compatible receiver and this application.
@@ -49,14 +55,14 @@ can be restored. User configuration, device caches and recovery journals are ret
 ### Linux
 
 Debian 12+ and Ubuntu 22.04+ are the compatibility baseline. Install the `.deb`
-using `sudo apt install ./easy-switch-link_0.2.1_amd64.deb` (or the arm64 package).
+using `sudo apt install ./easy-switch-link_0.2.3_amd64.deb` (or the arm64 package).
 The package installs receiver permissions, a desktop launcher, icon and optional
 systemd user service. Reconnect the receiver if access is denied after installation.
 
 For the standalone executable, make it executable and install standard libraries:
 
 ```sh
-chmod +x easy-switch-link-0.2.1-linux-amd64
+chmod +x easy-switch-link-0.2.3-linux-amd64
 sudo apt install libudev1 libxkbcommon0 libxkbcommon-x11-0 libegl1 libgl1 libx11-6 libxi6 libxrandr2 libxcursor1 libwayland-client0 libwayland-cursor0 libwayland-egl1
 sudo install -m 644 packaging/linux/70-easy-switch-link.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules

@@ -109,6 +109,26 @@ impl Engine {
         skip: Option<&str>,
         now: Instant,
     ) -> (Vec<SwitchCommand>, Vec<String>) {
+        self.plan_inner(group_id, computer, skip, now, false)
+    }
+    /// Edge handoffs include cached/reconnecting followers; the transport verifies
+    /// identity and reachability before any deferred recovery write.
+    pub fn plan_edge(
+        &mut self,
+        group_id: &str,
+        computer: &str,
+        now: Instant,
+    ) -> (Vec<SwitchCommand>, Vec<String>) {
+        self.plan_inner(group_id, computer, None, now, true)
+    }
+    fn plan_inner(
+        &mut self,
+        group_id: &str,
+        computer: &str,
+        skip: Option<&str>,
+        now: Instant,
+        edge: bool,
+    ) -> (Vec<SwitchCommand>, Vec<String>) {
         let mut commands = Vec::new();
         let mut messages = Vec::new();
         let Some(group) = self.config.groups.iter().find(|g| g.id == group_id) else {
@@ -122,7 +142,7 @@ impl Engine {
                 messages.push(format!("{} has no mapping for {computer}", member.id));
                 continue;
             };
-            let Some(d) = self.devices.get(&member.id).filter(|d| d.online) else {
+            let Some(d) = self.devices.get(&member.id).filter(|d| edge || d.online) else {
                 messages.push(format!("{} is unavailable on this computer", member.id));
                 continue;
             };
@@ -130,7 +150,7 @@ impl Engine {
                 messages.push(format!("{} does not support channel {ch}", d.name));
                 continue;
             }
-            if d.current_host == ch - 1 {
+            if !edge && d.current_host == ch - 1 {
                 continue;
             }
             commands.push(command(d, ch - 1));
@@ -210,6 +230,18 @@ mod tests {
         assert!(e.from_event("mouse", 2, now).0.is_empty());
         // A new destination is not swallowed by the duplicate guard.
         assert!(!e.from_event("keyboard", 2, now).1.is_empty());
+    }
+    #[test]
+    fn rapid_edge_handoffs_include_reconnecting_and_stale_host_followers() {
+        let mut e = engine();
+        e.devices.get_mut("keyboard").unwrap().online = false;
+        let now = Instant::now();
+        for destination in ["computer-2", "computer-1", "computer-2"] {
+            let (commands, _) = e.plan_edge("desk", destination, now);
+            assert_eq!(commands.len(), 2);
+            assert!(commands.iter().any(|c| c.id == "keyboard"));
+        }
+        assert_eq!(e.plan("desk", "computer-2", None, now).0.len(), 1);
     }
     #[test]
     fn diverted_source_survives_partial_failure_and_unmapped_channel() {
