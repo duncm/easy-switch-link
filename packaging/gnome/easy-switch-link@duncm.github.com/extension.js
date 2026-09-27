@@ -73,16 +73,20 @@ export default class EasySwitchLink extends Extension {
         const writtenUs = Number(written) / 1000;
         const now = GLib.get_monotonic_time();
         const lastActivity = now - this._idle.get_idletime() * 1000;
-        if (!Number.isFinite(writtenUs) || writtenUs > now || now - writtenUs > 1000000 ||
-            this._lastInput > writtenUs || lastActivity + 1000 > writtenUs || this._hidden)
-            return;
+        if (this._hidden) return;
+        if (!Number.isFinite(writtenUs) || writtenUs > now || now - writtenUs > 1000000) {
+            this._send({event: 'cursor', hidden: false, reason: 'Hide request expired or invalid'}); return;
+        }
+        if (this._lastInput > writtenUs || lastActivity + 1000 > writtenUs) {
+            this._send({event: 'cursor', hidden: false, reason: 'Local input since mouse switch write'}); return;
+        }
         if (this._tracker.inhibit_cursor_visibility && this._tracker.uninhibit_cursor_visibility) {
             this._tracker.inhibit_cursor_visibility();
             this._inhibited = true;
         } else if (this._tracker.set_pointer_visible) {
             this._tracker.set_pointer_visible(false);
         } else {
-            return;
+            this._send({event: 'cursor', hidden: false, reason: 'Cursor visibility API unavailable'}); return;
         }
         this._hidden = true;
         this._watchInput();
@@ -234,6 +238,7 @@ export default class EasySwitchLink extends Extension {
     }
 
     _clearBarriers() {
+        this._placementWait?.(false);
         this._release();
         for (const barrier of this._barriers ?? []) barrier.destroy();
         this._barriers = [];
@@ -283,6 +288,43 @@ export default class EasySwitchLink extends Extension {
         }
     }
 
+    _placePointer(point, deadline) {
+        // Native Mutter queues warps on its input thread. Checking synchronously
+        // sees the old position; observe completion without polling or re-warping.
+        return new Promise(resolve => {
+            let signal = 0;
+            let timer = 0;
+            let finished = false;
+            const track = !!(this._tracker.track_position && this._tracker.untrack_position);
+            const finish = ok => {
+                if (finished) return;
+                finished = true;
+                if (signal) this._tracker.disconnect(signal);
+                if (track) this._tracker.untrack_position();
+                if (timer) GLib.Source.remove(timer);
+                if (this._placementWait === finish) this._placementWait = null;
+                resolve(ok && GLib.get_monotonic_time() < deadline);
+            };
+            const check = () => {
+                const after = global.get_pointer();
+                if (Math.abs(after[0] - point.x) <= 2 && Math.abs(after[1] - point.y) <= 2)
+                    finish(true);
+            };
+            this._placementWait?.(false);
+            this._placementWait = finish;
+            signal = this._tracker.connect('position-invalidated', check);
+            if (track) this._tracker.track_position();
+            timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, Math.max(1,
+                Math.ceil((deadline - GLib.get_monotonic_time()) / 1000)), () => {
+                timer = 0; finish(false); return GLib.SOURCE_REMOVE;
+            });
+            try {
+                Clutter.get_default_backend().get_default_seat().warp_pointer(Math.round(point.x), Math.round(point.y));
+                check(); // X11 may complete synchronously.
+            } catch (_) { finish(false); }
+        });
+    }
+
     async _command(c) {
         switch (c.command) {
         case 'hello':
@@ -293,6 +335,7 @@ export default class EasySwitchLink extends Extension {
         case 'release': this._release(); break;
         case 'hide': this._hide(c.written_ns); break;
         case 'place': {
+            const connection = this._connection;
             this._restore(); const point = c.point;
             const before = global.get_pointer();
             const buttons = before[2] & (Clutter.ModifierType.BUTTON1_MASK | Clutter.ModifierType.BUTTON2_MASK |
@@ -304,18 +347,19 @@ export default class EasySwitchLink extends Extension {
             if (valid) {
                 this._reservation = {id: c.id, serial: this._serial, previous: before, until: GLib.get_monotonic_time() + 5000000};
                 this._watchInput();
-                Clutter.get_default_backend().get_default_seat().warp_pointer(Math.round(point.x), Math.round(point.y));
-                const after = global.get_pointer();
-                valid = Math.abs(after[0] - point.x) <= 2 && Math.abs(after[1] - point.y) <= 2;
+                valid = await this._placePointer(point, deadline);
             }
-            this._send({event: 'placed', id: c.id, ok: valid}); break;
+            if (connection === this._connection)
+                this._send({event: 'placed', id: c.id, ok: valid});
+            break;
         }
         case 'cancel':
+            if (this._reservation?.id !== c.id) break;
             if (this._reservation?.id === c.id && this._reservation.serial === this._serial &&
                 GLib.get_monotonic_time() < this._reservation.until)
                 Clutter.get_default_backend().get_default_seat().warp_pointer(this._reservation.previous[0], this._reservation.previous[1]);
             this._reservation = null; break;
-        case 'complete': this._reservation = null; break;
+        case 'complete': if (this._reservation?.id === c.id) this._reservation = null; break;
         default: throw new Error('Unknown companion command');
         }
     }

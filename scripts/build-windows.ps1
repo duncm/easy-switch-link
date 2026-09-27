@@ -12,10 +12,10 @@ try {
     python scripts/package-gnome.py
     if ($LASTEXITCODE -ne 0) { throw 'GNOME companion packaging failed' }
     $exePath = Join-Path $projectDir 'target/x86_64-pc-windows-msvc/release/easy-switch-link.exe'
-    Copy-Item -LiteralPath $exePath -Destination (Join-Path $outputDir 'easy-switch-link-0.3.1-windows-x64.exe')
-    wix build (Join-Path $projectDir 'packaging/windows/main.wxs') -arch x64 -d "ProjectDir=$projectDir" -d "ExePath=$exePath" -o (Join-Path $outputDir 'easy-switch-link-0.3.1-windows-x64.msi')
+    Copy-Item -LiteralPath $exePath -Destination (Join-Path $outputDir 'easy-switch-link-0.3.2-windows-x64.exe')
+    wix build (Join-Path $projectDir 'packaging/windows/main.wxs') -arch x64 -d "ProjectDir=$projectDir" -d "ExePath=$exePath" -o (Join-Path $outputDir 'easy-switch-link-0.3.2-windows-x64.msi')
     if ($LASTEXITCODE -ne 0) { throw 'WiX build failed' }
-    Get-ChildItem -LiteralPath $outputDir -File -Filter 'easy-switch-link-0.3.1-*' | Where-Object { $_.Extension -in '.exe','.msi','.zip' } | ForEach-Object {
+    Get-ChildItem -LiteralPath $outputDir -File -Filter 'easy-switch-link-0.3.2-*' | Where-Object { $_.Extension -in '.exe','.msi','.zip' } | ForEach-Object {
         $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
         "$hash  $($_.Name)"
     } | Set-Content -LiteralPath (Join-Path $outputDir 'SHA256SUMS-windows.txt') -Encoding ascii

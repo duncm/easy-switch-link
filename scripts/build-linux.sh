@@ -10,6 +10,6 @@ esac
 cargo build --locked --release -p easy-switch-link --target "$target"
 mkdir -p dist
 python3 scripts/package-gnome.py
-cp "${CARGO_TARGET_DIR:-target}/$target/release/easy-switch-link" "dist/easy-switch-link-0.3.1-linux-$arch"
-cargo deb --no-build --no-strip -p easy-switch-link --target "$target" --output "dist/easy-switch-link_0.3.1_${arch}.deb"
-(cd dist && sha256sum "easy-switch-link-0.3.1-linux-$arch" "easy-switch-link_0.3.1_${arch}.deb" easy-switch-link-0.3.1-gnome.shell-extension.zip > "SHA256SUMS-linux-$arch.txt")
+cp "${CARGO_TARGET_DIR:-target}/$target/release/easy-switch-link" "dist/easy-switch-link-0.3.2-linux-$arch"
+cargo deb --no-build --no-strip -p easy-switch-link --target "$target" --output "dist/easy-switch-link_0.3.2_${arch}.deb"
+(cd dist && sha256sum "easy-switch-link-0.3.2-linux-$arch" "easy-switch-link_0.3.2_${arch}.deb" easy-switch-link-0.3.2-gnome.shell-extension.zip > "SHA256SUMS-linux-$arch.txt")

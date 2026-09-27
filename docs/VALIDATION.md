@@ -1,5 +1,53 @@
 # Validation
 
+## 0.3.2 — GNOME Wayland placement (2026-09-27)
+
+After test-bravo switched from X11 to GNOME 48.7 Wayland, a bounded companion-socket
+trace showed `placed: false` immediately before a motion notification at the
+requested destination. Test-alpha correctly sent no hardware switch commands; the
+user confirmed both devices remained there. Mutter queues native pointer warps
+on an input thread, so the old immediate position check rejected a valid move.
+
+The companion now observes cursor position notifications after one warp, with
+balanced tracking and the existing preparation deadline. It does not poll or
+repeatedly warp. Timeout, session/topology interruption and controller replacement
+release the listener. Failed/expired/abandoned placement acknowledgements release
+the Rust reservation; compositor cancellation retains its independent no-input
+restore guard. Old cancellation/completion IDs cannot erase a newer reservation.
+Rejected hide requests now report a bounded reason in the local management log.
+
+Windows x64 passes 61 Rust tests and Linux amd64 passes 68; strict workspace
+Clippy and formatting pass. JavaScript regression tests cover delayed completion,
+confinement/deadline failure, cleanup, stale controllers/transactions, input during
+cancellation, abandoned replies and desktop invalidation. Native GJS/Gio socket
+checks pass on test-bravo with compositor doubles. ARM64 was cross-built against the
+Ubuntu 22.04 baseline; native ARM64 unit tests were not rerun. The native package
+upgrade from 0.3.1 to 0.3.2 succeeded on test-bravo, both system services restarted,
+and the installed executable hash matches the release build. After the user's
+logout/login, GNOME reports companion 302 active in a Wayland session.
+
+All six release artifacts and the companion ZIP built. Windows executable/MSI
+version metadata and CLI launch checks pass; the live Windows installation
+remains 0.3.1 because this fix changes the Linux/GNOME path only. Windows 0.3.2
+installer lifecycle testing was not repeated locally. Linux amd64 package
+install, upgrade from 0.3.1, reinstall, removal, headless IPC, activation rollback,
+configuration restoration and service-account isolation checks pass in the
+isolated root. Companion ZIP hashes match across Windows/Linux packaging.
+The user confirmed repeated edge round trips with both MX Keys S and MX Master
+3S following every time. The companion trace shows three successful placement
+acknowledgements followed by completion. Windows logged both device writes for
+each sampled outgoing handoff. Cursor placement was not separately confirmed in
+the user's reply. GDM/locked sessions and new idle resource measurements were
+not tested for this patch.
+
+Cursor hiding remains an open issue: the user reports that test-bravo's cursor stays
+visible. On one traced departure, the companion acknowledged hidden=true, then
+reported hidden=false about 4 ms later alongside outward physical motion, with
+another motion report about 4 ms after that. Other departures received motion
+after the switch write before a hide request was sent. The current all-input
+restoration/delayed-hide guard therefore conflicts with the mouse's trailing
+radio reports. This patch does not claim that cursor hiding is fixed.
+
 ## 0.3.1 â€” return switching in system mode (2026-09-27)
 
 An incoming edge handoff called receiver invalidation, which advanced the shared

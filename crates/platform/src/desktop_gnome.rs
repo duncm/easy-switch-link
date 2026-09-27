@@ -39,6 +39,8 @@ enum Input {
     },
     Cursor {
         hidden: bool,
+        #[serde(default)]
+        reason: Option<String>,
     },
 }
 enum Incoming {
@@ -162,8 +164,8 @@ pub fn start(
                                         if [point.x,point.y,delta.x,delta.y].iter().all(|v|v.is_finite()&&v.abs()<1_000_000.0){let previous=model.cursor.crossing;model.movement(point,delta,buttons,synthetic);if model.cursor.crossing!=previous{send(&mut c.write,json!({"command":"release"})).await?;}}
                                     }
                                     Input::Activity=>{model.input();model.state.cursor_hidden=false;}
-                                    Input::Cursor{hidden}=>{model.state.cursor_hidden=hidden;model.publish();}
-                                    Input::Placed{id,ok}=>{if placement.as_ref().is_some_and(|v|v.0==id){let(_,deadline,reply)=placement.take().unwrap();let _=reply.send(if ok&&Instant::now()<deadline{Ok(id)}else{Err("Compositor placement failed or expired".into())});}}
+                                    Input::Cursor{hidden,reason}=>{model.cursor.hidden=hidden;model.state.cursor_hidden=hidden;if let Some(reason)=reason{tracing::info!(reason=%reason.chars().take(160).collect::<String>(),"GNOME cursor visibility");}model.publish();}
+                                    Input::Placed{id,ok}=>{if finish_placement(&mut model,&mut placement,id,ok){send(&mut c.write,json!({"command":"cancel","id":id})).await?;}}
                                 }
                             }
                         }
@@ -180,13 +182,13 @@ pub fn start(
                                 let result=(||->Result<(u64,Point)>{ensure!(Instant::now()<deadline,"Placement expired");let c=client.as_ref().context("No compositor")?;let s=authorized?;ensure!(s.id==c.session,"Desktop changed");model.placement(&segment,fraction,generation)})();
                                 match result{Ok((id,point))=>{model.state.pointer=point;placement=Some((id,deadline,reply));if let Some(c)=&mut client{let until=system::monotonic_ns().saturating_add(deadline.saturating_duration_since(Instant::now()).as_nanos() as u64);send(&mut c.write,json!({"command":"place","id":id,"point":point,"deadline_ns":until.to_string()})).await?;}},Err(e)=>{let _=reply.send(Err(e.to_string()));}}
                             }
-                            Command::Cancel(id)=>{if let Some(point)=model.cancel(id)&&let Some(c)=&mut client{send(&mut c.write,json!({"command":"cancel","id":id,"point":point})).await?;}},
+                            Command::Cancel(id)=>{model.cancel(id);if let Some(c)=&mut client{send(&mut c.write,json!({"command":"cancel","id":id})).await?;}},
                             Command::Complete(id)=>{model.complete(id);if let Some(c)=&mut client{send(&mut c.write,json!({"command":"complete","id":id})).await?;}},
                             Command::Authorize=>{if let Some(c)=&mut client{send(&mut c.write,json!({"command":"hello","version":1})).await?;}},
                             Command::SessionLocked(_)=>{}
                         }
                     },
-                    _=tokio::time::sleep_until(deadline.into()),if placement.is_some()=>{if let Some((id,_,reply))=placement.take(){let _=reply.send(Err("Compositor placement timed out".into()));if let Some(point)=model.cancel(id)&&let Some(c)=&mut client{send(&mut c.write,json!({"command":"cancel","id":id,"point":point})).await?;}}}
+                    _=tokio::time::sleep_until(deadline.into()),if placement.is_some()=>{if let Some((id,_,reply))=placement.take(){model.cancel(id);let _=reply.send(Err("Compositor placement timed out".into()));if let Some(c)=&mut client{send(&mut c.write,json!({"command":"cancel","id":id})).await?;}}}
                 }
             }
             if let Some(mut c)=client{let _=send(&mut c.write,json!({"command":"restore"})).await;}
@@ -195,6 +197,34 @@ pub fn start(
     })?;
     Ok(Arc::new(|| {}))
 }
+// Return whether the companion must cancel its matching reservation. Its own
+// input serial decides whether restoring the old cursor position is still safe.
+fn finish_placement(
+    model: &mut Model,
+    placement: &mut Option<Placement>,
+    id: u64,
+    ok: bool,
+) -> bool {
+    if !placement.as_ref().is_some_and(|v| v.0 == id) {
+        return false;
+    }
+    let (_, deadline, reply) = placement.take().unwrap();
+    let accepted =
+        ok && Instant::now() < deadline && model.reservation.as_ref().is_some_and(|r| r.id == id);
+    if !accepted {
+        model.cancel(id);
+    }
+    let delivered = reply.send(if accepted {
+        Ok(id)
+    } else {
+        Err("Compositor placement failed or expired".into())
+    });
+    if delivered.is_err() {
+        model.cancel(id);
+    }
+    !accepted || delivered.is_err()
+}
+
 async fn authorize(policy: &Policy, uid: u32, pid: u32) -> Result<system::Session> {
     let policy = policy.clone();
     tokio::task::spawn_blocking(move || system::authorize_desktop(&policy, uid, pid)).await?
@@ -214,5 +244,46 @@ fn reset(model: &mut Model, placement: &mut Option<Placement>, reason: &str) {
     model.unavailable(reason);
     if let Some((_, _, reply)) = placement.take() {
         let _ = reply.send(Err(reason.into()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_late_and_abandoned_placements_release_reservations() {
+        for scenario in 0..5 {
+            let (events, _) = crossbeam_channel::unbounded();
+            let mut model = Model::new("test", events);
+            model.reservation = Some(Reservation {
+                id: 7,
+                previous: Point::default(),
+                serial: 0,
+                until: Instant::now() + Duration::from_secs(5),
+            });
+            // Activity prevents restoration, but must not prevent cleanup.
+            model.input();
+            let (reply, receiver) = oneshot::channel();
+            let mut receiver = Some(receiver);
+            if scenario == 2 {
+                receiver.take();
+            }
+            if scenario == 4 {
+                model.unavailable("Display removed during placement");
+            }
+            let deadline = if scenario == 1 {
+                Instant::now()
+            } else {
+                Instant::now() + Duration::from_secs(1)
+            };
+            let mut pending = Some((7, deadline, reply));
+            assert!(!finish_placement(&mut model, &mut pending, 6, false));
+            assert!(pending.is_some());
+            let cancel = finish_placement(&mut model, &mut pending, 7, scenario != 0);
+            assert_eq!(cancel, scenario != 3);
+            assert_eq!(model.reservation.is_none(), scenario != 3);
+            assert!(pending.is_none());
+        }
     }
 }
