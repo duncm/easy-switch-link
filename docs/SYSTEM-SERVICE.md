@@ -1,4 +1,4 @@
-# Linux system operation (0.3.3)
+# Linux system operation (0.3.4)
 
 System operation is optional. Installing the package does not enable it or change
 the login screen. The ordinary user-session monitor remains the default.
@@ -6,7 +6,7 @@ the login screen. The ordinary user-session monitor remains the default.
 ## Enable and disable
 
 First save a working configuration as the intended desktop user. Install the
-0.3.3 `.deb`, then choose one of these administrative operations:
+0.3.4 `.deb`, then choose one of these administrative operations:
 
 ```sh
 # Hardware synchronization before login, with session-only LAN coordination:
@@ -38,6 +38,14 @@ user and restores the previous startup files. Restart the user monitor afterward
 Changing the designated owner or login policy requires disabling and re-enabling
 system mode. Currently one owner and `seat0` are supported.
 
+The tray is part of `/usr/bin/easy-switch-link run`, started by
+`~/.config/autostart/easy-switch-link-system.desktop`. There is no
+`easy-switch-link-tray.service`. The packaged `easy-switch-link.service` user
+unit runs `--headless`; system-mode activation disables that old receiver owner.
+To start a stopped tray companion manually, run `easy-switch-link run` in the
+graphical session. It waits for GNOME's AppIndicator/StatusNotifier support and
+registers when that extension becomes ready, including after a tray-host restart.
+
 The session's Quit action closes the session companion; it does not disable the
 hardware service. With login-screen handoffs enabled, the machine peer coordinator
 also remains running. Pause controls hardware forwarding for the running service;
@@ -64,11 +72,11 @@ requires installing its system units, accounts, helper and permission setup;
 simply running the standalone executable as root is not equivalent.
 
 For a manual system installation, use the release executable matching the host
-architecture and the matching 0.3.3 source checkout. On a systemd/udev distribution
+architecture and the matching 0.3.4 source checkout. On a systemd/udev distribution
 with Python 3 installed, run these from the checkout (replace the executable path):
 
 ```sh
-sudo install -m 755 /path/to/easy-switch-link-0.3.3-linux-arm64 /usr/bin/easy-switch-link
+sudo install -m 755 /path/to/easy-switch-link-0.3.4-linux-arm64 /usr/bin/easy-switch-link
 sudo install -d /usr/lib/easy-switch-link /usr/lib/sysusers.d /usr/lib/udev/rules.d
 sudo install -m 755 packaging/linux/service-admin /usr/lib/easy-switch-link/service-admin
 sudo install -m 644 packaging/linux/easy-switch-link.sysusers /usr/lib/sysusers.d/easy-switch-link.conf
@@ -92,7 +100,7 @@ computers. The cursor hides only after a successful mouse command for an edge
 handoff. Manual switching never hides it. Local activity, arrival, pause,
 controller loss and desktop transitions restore visibility.
 
-On GNOME Wayland, 0.3.3 permits motion from the departing mouse's receiver for
+On GNOME Wayland, 0.3.3 and later permit motion from the departing mouse's receiver for
 250 ms after its successful edge-switch write. This lets the mouse's final radio
 reports finish without immediately revealing the source cursor. Bolt may merge
 multiple paired mice into one input node: their motion shares this brief exception.

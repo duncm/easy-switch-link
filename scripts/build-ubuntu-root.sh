@@ -9,7 +9,7 @@ printf '%s\n' 'deb [arch=amd64] http://archive.ubuntu.com/ubuntu jammy main univ
 apt-get update -qq
 apt-get install -y --no-install-recommends build-essential curl pkg-config libudev-dev libxkbcommon-dev libxkbcommon-x11-dev \
     libx11-dev libxi-dev libxrandr-dev libxcursor-dev libegl1-mesa-dev libgl1-mesa-dev libwayland-dev \
-    python3 xz-utils ca-certificates git dpkg-dev dbus systemd
+    python3 python3-gi xz-utils ca-certificates git dpkg-dev dbus systemd
 if ! test -x /root/.cargo/bin/cargo; then
     curl --fail --silent --show-error https://sh.rustup.rs -o /tmp/rustup-init.sh
     sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain 1.98.1
@@ -21,3 +21,4 @@ cd /work
 cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets -- -D warnings
 bash scripts/build-linux.sh x86_64-unknown-linux-gnu
+dbus-run-session -- python3 scripts/test-tray-startup.py dist/easy-switch-link-0.3.4-linux-amd64

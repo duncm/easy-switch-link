@@ -131,6 +131,13 @@ fn linux_tray(paths: Paths) -> Result<()> {
         fn title(&self) -> String {
             "Easy-Switch Link".into()
         }
+        fn watcher_offline(&self, _reason: ksni::OfflineReason) -> bool {
+            tracing::info!("Tray host unavailable; waiting for desktop tray support");
+            true
+        }
+        fn watcher_online(&self) {
+            tracing::info!("Desktop tray host available");
+        }
         fn icon_name(&self) -> String {
             "easy-switch-link".into()
         }
@@ -172,7 +179,9 @@ fn linux_tray(paths: Paths) -> Result<()> {
         .name("linux-tray".into())
         .spawn(move || {
             use ksni::blocking::TrayMethods;
-            match (LinuxTray { paths }).spawn() {
+            // GNOME's indicator extension may start after XDG autostart apps.
+            // Keep the D-Bus owner-change subscription alive until it appears.
+            match (LinuxTray { paths }).assume_sni_available(true).spawn() {
                 Ok(_handle) => loop {
                     std::thread::park();
                 },

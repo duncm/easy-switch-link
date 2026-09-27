@@ -1,5 +1,42 @@
 # Validation
 
+## 0.3.4 — tray startup ordering (2026-09-27)
+
+Test-bravo's XDG-autostart session companion was running, but its journal reported
+StatusNotifierWatcher ServiceUnknown at login. GNOME's AppIndicator extension
+became available afterward; the failed tray thread did not register again.
+Restarting only the session companion registered the Easy-Switch Link item on
+the live GNOME session bus; receiver and peer services stayed active.
+
+The Linux tray now keeps ksni's D-Bus owner-change subscription alive while the
+tray host is absent, registers when it appears, and survives watcher restarts.
+There is no polling/backoff timer and no new tray-only service. Documentation
+identifies the XDG autostart file and distinguishes the headless user unit from
+the system-mode session companion.
+
+A private-bus integration test starts the real application without a watcher,
+adds one later, and replaces it while checking that the same application/tray
+owner registers again. The previous 0.3.3 release reproduces the startup failure
+in this test. Version 0.3.4 passes both late-start and watcher-restart cases on a
+real private D-Bus with a simulated watcher and the production tray executable.
+The regression is included in native Linux CI for both architectures.
+
+Windows x64 passes 61 Rust tests and Linux amd64 passes 68; strict workspace
+Clippy and formatting pass. Windows/GNOME cursor and hardware dispatch behavior
+are unchanged. The running 0.3.3 tray was restored on test-bravo by restarting only its
+session companion. Version 0.3.4 was then installed on test-bravo; its installed executable matches the
+ARM64 release hash. Both system services are active, the session companion
+registered an Active Easy-Switch Link tray item, and GNOME handoff readiness is
+preserved. The companion extension code did not change, so no logout was needed.
+Full GNOME login ordering was not retested interactively; the private-bus test
+covers the reproduced ordering failure and watcher restart.
+
+All six release artifacts and the GNOME ZIP were built. Linux amd64 package
+install/upgrade from 0.3.3/reinstall/removal, headless IPC, activation rollback,
+configuration restoration and service-account isolation checks pass. Windows
+portable launch and MSI version metadata pass; Windows installer lifecycle and
+native ARM64 unit tests were not repeated for this patch.
+
 ## 0.3.3 — GNOME receiver-motion grace (2026-09-27)
 
 The user authorized a 250 ms receiver-level motion exception while retaining
