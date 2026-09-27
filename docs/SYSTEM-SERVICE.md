@@ -1,4 +1,4 @@
-# Linux system operation (0.3.2)
+# Linux system operation (0.3.3)
 
 System operation is optional. Installing the package does not enable it or change
 the login screen. The ordinary user-session monitor remains the default.
@@ -6,7 +6,7 @@ the login screen. The ordinary user-session monitor remains the default.
 ## Enable and disable
 
 First save a working configuration as the intended desktop user. Install the
-0.3.2 `.deb`, then choose one of these administrative operations:
+0.3.3 `.deb`, then choose one of these administrative operations:
 
 ```sh
 # Hardware synchronization before login, with session-only LAN coordination:
@@ -64,11 +64,11 @@ requires installing its system units, accounts, helper and permission setup;
 simply running the standalone executable as root is not equivalent.
 
 For a manual system installation, use the release executable matching the host
-architecture and the matching 0.3.2 source checkout. On a systemd/udev distribution
+architecture and the matching 0.3.3 source checkout. On a systemd/udev distribution
 with Python 3 installed, run these from the checkout (replace the executable path):
 
 ```sh
-sudo install -m 755 /path/to/easy-switch-link-0.3.2-linux-arm64 /usr/bin/easy-switch-link
+sudo install -m 755 /path/to/easy-switch-link-0.3.3-linux-arm64 /usr/bin/easy-switch-link
 sudo install -d /usr/lib/easy-switch-link /usr/lib/sysusers.d /usr/lib/udev/rules.d
 sudo install -m 755 packaging/linux/service-admin /usr/lib/easy-switch-link/service-admin
 sudo install -m 644 packaging/linux/easy-switch-link.sysusers /usr/lib/sysusers.d/easy-switch-link.conf
@@ -91,6 +91,18 @@ released after activation or at most 200 ms. Input is not forwarded between
 computers. The cursor hides only after a successful mouse command for an edge
 handoff. Manual switching never hides it. Local activity, arrival, pause,
 controller loss and desktop transitions restore visibility.
+
+On GNOME Wayland, 0.3.3 permits motion from the departing mouse's receiver for
+250 ms after its successful edge-switch write. This lets the mouse's final radio
+reports finish without immediately revealing the source cursor. Bolt may merge
+multiple paired mice into one input node: their motion shares this brief exception.
+Movement during the window is ignored for cursor restoration; movement after it,
+or any click/key/scroll, restores visibility. Other receivers, unknown devices
+and virtual inputs such as Sunshine restore immediately. Input still reaches
+applications normally; no events are consumed. The companion observes event type
+and device node only, never key contents. If source attribution is unsupported,
+it retains strict restoration. A single end-of-window hide handles compositor
+visibility updates; there is no recurring visibility enforcement or idle polling.
 
 The companion uses GNOME display identities, which differ from X11/portal IDs.
 Select the new source and destination display bindings after changing backend.

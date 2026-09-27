@@ -998,7 +998,7 @@ async fn handoff(
     layout: u64,
     at: Instant,
 ) -> Result<()> {
-    let (rule, peer, generation, target_layout, target_config, dispatch) = {
+    let (rule, peer, generation, target_layout, target_config, dispatch, _receiver) = {
         let mut s = shared.lock().unwrap();
         ensure!(!s.outbound, "A handoff is already in progress");
         ensure!(
@@ -1036,6 +1036,7 @@ async fn handoff(
             p.status.generation,
             p.status.config_generation,
             s.dispatch.clone(),
+            mouse.receiver.clone(),
         );
         s.outbound = true;
         result
@@ -1053,6 +1054,13 @@ async fn handoff(
     shared.lock().unwrap().pending.insert(key.clone(), tx);
     let mut dispatch_requested = false;
     let result = async {
+        #[cfg(target_os = "linux")]
+        if let Some(desktop) = shared.lock().unwrap().desktop.clone() {
+            desktop.send(desktop::Command::ArmDeparture {
+                crossing: at,
+                receiver: _receiver,
+            })?;
+        }
         peer.try_send(Wire::Prepare {
             id: transaction.clone(),
             destination: rule.destination.clone(),

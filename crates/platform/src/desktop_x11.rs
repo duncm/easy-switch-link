@@ -254,6 +254,7 @@ pub fn start(
                                 model.publish();
                                 barriers(&c, root, &model, &mut active)?;
                             }
+                            Command::ArmDeparture { .. } => {}
                             Command::Configure { enabled, rules } => {
                                 model.cursor.restore();
                                 model.latch.reset();

@@ -20,6 +20,18 @@ export default class EasySwitchLink extends Extension {
         this._reservation = null;
         this._tracker = global.backend.get_cursor_tracker?.() ?? Meta.CursorTracker.get_for_display(global.display);
         this._idle = global.backend.get_core_idle_monitor();
+        this._seat = Clutter.get_default_backend().get_default_seat();
+        this._inputFilter = null;
+        if (Meta.is_wayland_compositor?.() && Clutter.Event?.add_filter && Clutter.Event?.remove_filter) {
+            try {
+                this._inputFilter = Clutter.Event.add_filter(global.stage, event => {
+                    try { this._inputEvent(event); }
+                    catch (_) { try { this._activity(); } catch (_) { this._cancelArm(); } }
+                    // Observe only; never consume, redirect, or retain input contents.
+                    return Clutter.EVENT_PROPAGATE;
+                });
+            } catch (_) { /* Older introspection: retain conservative idle restoration. */ }
+        }
         this._signals = [
             [Main.layoutManager, Main.layoutManager.connect('monitors-changed', () => this._layout())],
             [Main.sessionMode, Main.sessionMode.connect('updated', () => {
@@ -32,6 +44,8 @@ export default class EasySwitchLink extends Extension {
     disable() {
         this._enabled = false;
         this._disconnect();
+        if (this._inputFilter !== null) Clutter.Event.remove_filter(this._inputFilter);
+        this._inputFilter = null;
         if (this._retry) GLib.Source.remove(this._retry);
         this._retry = 0;
         if (this._watch) this._idle.remove_watch(this._watch);
@@ -41,6 +55,7 @@ export default class EasySwitchLink extends Extension {
     }
 
     _watchInput() {
+        if (this._inputFilter != null) return;
         if (!this._enabled || this._watch) return;
         this._watch = this._idle.add_user_active_watch(() => {
             this._watch = 0;
@@ -57,7 +72,48 @@ export default class EasySwitchLink extends Extension {
         if (this._connection && notify) this._send({event: 'activity'});
     }
 
+    _inputEvent(event) {
+        const type = event.type();
+        if ([Clutter.EventType.NOTHING, Clutter.EventType.ENTER, Clutter.EventType.LEAVE].includes(type)) return;
+        const device = event.get_source_device();
+        // Mutter's own warp uses the core pointer with timestamp zero.
+        if (type === Clutter.EventType.MOTION && device === this._seat.get_pointer() && event.get_time() === 0) return;
+        const armed = this._armed;
+        const now = GLib.get_monotonic_time();
+        if (type === Clutter.EventType.MOTION && armed && now < armed.until &&
+            armed.nodes.has(device?.get_device_node?.()) && !this._buttons(event.get_state())) {
+            // Ignored only for visibility, never for the no-input rollback guard.
+            this._serial++;
+            return;
+        }
+        this._activity();
+    }
+
+    _buttons(mask) {
+        return mask & (Clutter.ModifierType.BUTTON1_MASK | Clutter.ModifierType.BUTTON2_MASK |
+            Clutter.ModifierType.BUTTON3_MASK | Clutter.ModifierType.BUTTON4_MASK | Clutter.ModifierType.BUTTON5_MASK);
+    }
+
+    _cancelArm() {
+        if (this._armTimer) GLib.Source.remove(this._armTimer);
+        this._armTimer = 0;
+        this._armed = null;
+    }
+
+    _armDeparture(c) {
+        this._restore();
+        if (this._inputFilter == null || typeof c.id !== 'string' || c.id.length > 32 ||
+            !Array.isArray(c.nodes) || c.nodes.length > 16 ||
+            !c.nodes.every(n => typeof n === 'string' && /^\/dev\/input\/event\d+$/.test(n))) return;
+        const now = GLib.get_monotonic_time();
+        this._armed = {id: c.id, nodes: new Set(c.nodes), started: now, until: now + 1000000};
+        this._armTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
+            this._armTimer = 0; this._armed = null; return GLib.SOURCE_REMOVE;
+        });
+    }
+
     _restore() {
+        this._cancelArm();
         if (!this._hidden) return;
         this._hidden = false;
         if (this._inhibited) {
@@ -69,15 +125,24 @@ export default class EasySwitchLink extends Extension {
         this._send({event: 'cursor', hidden: false});
     }
 
-    _hide(written) {
+    _hide(written, armId = null) {
         const writtenUs = Number(written) / 1000;
         const now = GLib.get_monotonic_time();
         const lastActivity = now - this._idle.get_idletime() * 1000;
         if (this._hidden) return;
+        if (armId == null) this._cancelArm();
+        const armed = armId == null ? null : this._armed;
+        if (armId != null && (!armed || armed.id !== armId || now >= armed.until ||
+            writtenUs < armed.started || now >= writtenUs + 250000)) {
+            this._cancelArm();
+            this._send({event: 'cursor', hidden: false, reason: 'Departure cancelled by input or expired'}); return;
+        }
         if (!Number.isFinite(writtenUs) || writtenUs > now || now - writtenUs > 1000000) {
+            this._cancelArm();
             this._send({event: 'cursor', hidden: false, reason: 'Hide request expired or invalid'}); return;
         }
-        if (this._lastInput > writtenUs || lastActivity + 1000 > writtenUs) {
+        if (this._lastInput > writtenUs || (this._inputFilter == null && lastActivity + 1000 > writtenUs)) {
+            this._cancelArm();
             this._send({event: 'cursor', hidden: false, reason: 'Local input since mouse switch write'}); return;
         }
         if (this._tracker.inhibit_cursor_visibility && this._tracker.uninhibit_cursor_visibility) {
@@ -86,9 +151,24 @@ export default class EasySwitchLink extends Extension {
         } else if (this._tracker.set_pointer_visible) {
             this._tracker.set_pointer_visible(false);
         } else {
+            this._cancelArm();
             this._send({event: 'cursor', hidden: false, reason: 'Cursor visibility API unavailable'}); return;
         }
         this._hidden = true;
+        if (armed) {
+            if (this._armTimer) GLib.Source.remove(this._armTimer);
+            armed.until = writtenUs + 250000;
+            this._armTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, Math.max(1, Math.ceil((armed.until - now) / 1000)), () => {
+                this._armTimer = 0;
+                if (this._armed === armed && this._hidden) {
+                    this._armed = null;
+                    // Some Mutter paths reveal the cursor on motion themselves.
+                    // Seal this single departure once, never force visibility continuously.
+                    if (!this._inhibited) this._tracker.set_pointer_visible(false);
+                }
+                return GLib.SOURCE_REMOVE;
+            });
+        }
         this._watchInput();
         this._send({event: 'cursor', hidden: true});
     }
@@ -230,10 +310,11 @@ export default class EasySwitchLink extends Extension {
             }
             if (connection !== this._connection || generation !== this._layoutGeneration) return;
             this._send({event: 'layout', version: 1, displays,
+                input_source: this._inputFilter != null,
                 cursor: !!(this._tracker.set_pointer_visible || this._tracker.inhibit_cursor_visibility)});
         } catch (_) {
             if (connection === this._connection && generation === this._layoutGeneration)
-                this._send({event: 'layout', version: 1, displays: [], cursor: false});
+                this._send({event: 'layout', version: 1, displays: [], cursor: false, input_source: false});
         }
     }
 
@@ -333,7 +414,8 @@ export default class EasySwitchLink extends Extension {
         case 'configure': this._configure(c); break;
         case 'restore': this._restore(); break;
         case 'release': this._release(); break;
-        case 'hide': this._hide(c.written_ns); break;
+        case 'arm': this._armDeparture(c); break;
+        case 'hide': this._hide(c.written_ns, c.arm); break;
         case 'place': {
             const connection = this._connection;
             this._restore(); const point = c.point;

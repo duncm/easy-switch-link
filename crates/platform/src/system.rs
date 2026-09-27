@@ -388,6 +388,44 @@ impl Activity {
         }))
     }
 }
+/// Metadata only: the peer account gains no access to input-event contents.
+/// All mice on this receiver may share a node; callers must not claim per-mouse attribution.
+pub fn receiver_pointer_nodes(receiver: &str) -> Result<Vec<String>> {
+    let mut e = udev::Enumerator::new()?;
+    e.match_subsystem("input")?;
+    let mut nodes = Vec::new();
+    for d in e.scan_devices()? {
+        let Some(path) = d.devnode().filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("event"))
+        }) else {
+            continue;
+        };
+        if d.property_value("ID_INPUT_MOUSE").is_none()
+            || d.property_value("ID_INPUT_KEYBOARD").is_some()
+        {
+            continue;
+        }
+        let Some(usb) = d.parent_with_subsystem_devtype("usb", "usb_device")? else {
+            continue;
+        };
+        if usb.syspath().to_string_lossy() == receiver
+            && usb.attribute_value("idVendor").and_then(|s| s.to_str()) == Some("046d")
+            && usb
+                .attribute_value("idProduct")
+                .and_then(|s| s.to_str())
+                .and_then(|s| u16::from_str_radix(s, 16).ok())
+                .is_some_and(|pid| crate::RECEIVER_PIDS.contains(&pid))
+        {
+            nodes.push(path.to_string_lossy().into_owned());
+        }
+    }
+    ensure!(nodes.len() <= 16, "Ambiguous receiver input topology");
+    nodes.sort();
+    nodes.dedup();
+    Ok(nodes)
+}
+
 fn scan(state: &Mutex<Observation>) -> Result<Vec<Node>> {
     let mut s = state.lock().unwrap();
     s.generation += 1;

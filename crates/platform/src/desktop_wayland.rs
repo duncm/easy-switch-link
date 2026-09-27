@@ -39,6 +39,7 @@ pub fn start(
                             Command::Restore(reply) => {
                                 let _ = reply.send(());
                             }
+                            Command::ArmDeparture { .. } => {}
                             Command::Configure { enabled, rules } => {
                                 model.enabled = enabled;
                                 model.rules = rules;
@@ -254,6 +255,7 @@ async fn session(
             // InputCapture does not expose input outside active capture. We cannot
             // prove the pointer stayed untouched, so never roll it back blindly.
             Command::Cancel(id)|Command::Complete(id)=>model.complete(id),
+            Command::ArmDeparture { .. } => {},
         }},
         event=sender.next()=>{match event.context("EIS sender disconnected")?? {
             EiEvent::SeatAdded(e)=>{e.seat.bind_capabilities(DeviceCapability::PointerAbsolute.into());send_context.flush()?;},

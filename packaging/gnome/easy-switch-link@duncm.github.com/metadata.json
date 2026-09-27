@@ -4,7 +4,7 @@
   "description": "Local cursor and display companion for Easy-Switch Link. Optional GDM and lock-screen handoffs require the system service.",
   "shell-version": ["45", "46", "47", "48", "49", "50", "51"],
   "session-modes": ["user", "unlock-dialog", "gdm"],
-  "version": 302,
-  "version-name": "0.3.2",
+  "version": 303,
+  "version-name": "0.3.3",
   "url": "https://github.com/duncm/easy-switch-link"
 }

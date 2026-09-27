@@ -365,6 +365,12 @@ mod session_watch;
 
 pub enum Command {
     Restore(oneshot::Sender<()>),
+    /// Prepare GNOME's bounded receiver-motion exception before dispatch.
+    #[cfg(target_os = "linux")]
+    ArmDeparture {
+        crossing: Instant,
+        receiver: String,
+    },
     /// Sent only after the primary mouse's edge-switch HID write succeeds.
     Depart {
         crossing: Instant,

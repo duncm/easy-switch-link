@@ -25,6 +25,8 @@ enum Input {
         version: u32,
         displays: Vec<Display>,
         cursor: bool,
+        #[serde(default)]
+        input_source: bool,
     },
     Motion {
         point: Point,
@@ -126,6 +128,7 @@ pub fn start(
             let(listener_tx,mut incoming)=mpsc::channel(64);let wake=listener_tx.clone();system::watch_sessions(move||{let _=wake.try_send(Incoming::Refresh);})?;
             let rt=tokio::runtime::Builder::new_current_thread().enable_all().build()?;rt.block_on(async{
             let listener=UnixListener::from_std(listener)?;let mut client:Option<Client>=None;let mut placement:Option<Placement>=None;let mut next=0u64;
+            let mut input_source=false;let mut armed:Option<(Instant,String)>=None;let mut arm_sequence=0u64;
             loop {
                 let deadline=placement.as_ref().map(|v|v.1).unwrap_or_else(||Instant::now()+Duration::from_secs(86400*365));
                 tokio::select!{
@@ -155,9 +158,10 @@ pub fn start(
                             Incoming::Input(sequence,input)=>{
                                 let Some(c)=client.as_mut().filter(|c|c.sequence==sequence)else{continue;};
                                 match input {
-                                    Input::Layout{version,displays,cursor}=>{
+                                    Input::Layout{version,displays,cursor,input_source:observes_source}=>{
+                                        input_source=observes_source;armed=None;
                                         ensure!(version==1&&displays.len()<=32,"Incompatible companion layout");
-                                        model.cursor.restore();model.topology(displays);model.state.cursor_visibility=if cursor{"GNOME compositor cursor control"}else{"GNOME cursor API unavailable"}.into();model.publish();
+                                        model.cursor.restore();model.topology(displays);model.state.cursor_visibility=if cursor&&input_source{"GNOME cursor control; 250 ms receiver motion grace"}else if cursor{"GNOME compositor cursor control; strict input restoration"}else{"GNOME cursor API unavailable"}.into();model.publish();
                                         send(&mut c.write,json!({"command":"configure","enabled":model.enabled,"rules":model.rules,"displays":model.state.displays})).await?;
                                     }
                                     Input::Motion{point,delta,buttons,synthetic}=>{
@@ -176,7 +180,19 @@ pub fn start(
                             Command::Stop=>break,
                             Command::Configure{enabled,rules}=>{model.cursor.restore();model.latch.reset();model.enabled=enabled;model.rules=rules;if let Some(c)=&mut client{send(&mut c.write,json!({"command":"configure","enabled":enabled,"rules":model.rules,"displays":model.state.displays})).await?;}},
                             Command::Restore(reply)=>{model.cursor.restore();if let Some(c)=&mut client{let _=send(&mut c.write,json!({"command":"restore"})).await;}let _=reply.send(());},
-                            Command::Depart{crossing,written}=>{model.cursor.depart(crossing,written,Instant::now());if model.cursor.hidden&&let Some(c)=&mut client{send(&mut c.write,json!({"command":"hide","written_ns":system::monotonic_ns().saturating_sub(written.elapsed().as_nanos() as u64).to_string()})).await?;}},
+                            Command::ArmDeparture{crossing,receiver}=>{
+                                armed=None;
+                                if input_source&&model.cursor.crossing==Some(crossing)&&let Some(c)=&mut client{
+                                    let nodes=system::receiver_pointer_nodes(&receiver).unwrap_or_default();
+                                    arm_sequence=arm_sequence.wrapping_add(1);let id=arm_sequence.to_string();
+                                    armed=Some((crossing,id.clone()));send(&mut c.write,json!({"command":"arm","id":id,"nodes":nodes})).await?;
+                                }
+                            },
+                            Command::Depart{crossing,written}=>{
+                                let arm=armed.take().filter(|a|a.0==crossing);
+                                let eligible=if arm.is_some(){let valid=model.cursor.crossing==Some(crossing)&&written>=crossing&&written<=Instant::now()&&crossing.elapsed()<Duration::from_secs(1);model.cursor.crossing=None;valid}else{model.cursor.depart(crossing,written,Instant::now());model.cursor.hidden};
+                                if eligible&&let Some(c)=&mut client{send(&mut c.write,json!({"command":"hide","arm":arm.map(|a|a.1),"written_ns":system::monotonic_ns().saturating_sub(written.elapsed().as_nanos() as u64).to_string()})).await?;}
+                            },
                             Command::Place{deadline,segment,fraction,generation,reply}=>{
                                 let authorized=if let Some(c)=&client{authorize(&p,c.uid,c.pid).await}else{Err(anyhow::anyhow!("No compositor"))};
                                 let result=(||->Result<(u64,Point)>{ensure!(Instant::now()<deadline,"Placement expired");let c=client.as_ref().context("No compositor")?;let s=authorized?;ensure!(s.id==c.session,"Desktop changed");model.placement(&segment,fraction,generation)})();

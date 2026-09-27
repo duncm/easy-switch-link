@@ -1,5 +1,52 @@
 # Validation
 
+## 0.3.3 — GNOME receiver-motion grace (2026-09-27)
+
+The user authorized a 250 ms receiver-level motion exception while retaining
+both Logi M650 pairings. A read-only Bolt inventory on test-bravo found MX Keys S,
+MX Keys Mini, MX Master 3S, and two M650 slots; no pairings were removed. Linux
+exposes a shared receiver mouse node, so this is explicitly not per-mouse
+attribution. Sunshine's virtual passthrough nodes remain outside the exception.
+
+Before dispatch, the Linux coordinator arms the companion with pointer-node
+metadata resolved through the selected mouse's physical USB receiver. The peer
+account opens no event devices. GNOME's observation-only event filter always
+propagates input and reads only event type, source node and held-button state.
+Successful edge-write acknowledgement opens a window ending 250 ms after the
+write, not after message delivery. Unknown/other/virtual input, clicks, keys,
+scrolling, held buttons, unplugging, arrival, configuration/session changes and
+controller loss invalidate it. A single end-of-window hide handles compositor
+visibility updates. No recurring cursor polling or visibility forcing is added.
+Unsupported observation retains conservative restoration; Windows/X11 behavior
+and all HID dispatch/retry rules remain unchanged.
+
+Windows x64 passes 61 Rust tests; Linux amd64 passes 68, with strict workspace
+Clippy. JavaScript tests cover receiver tails before/after acknowledgement,
+unknown and virtual input, clicks/keys/scroll, held buttons, unplugging, delayed
+acknowledgements, cancellation, wrong transactions, invalid node paths, bounded
+cleanup, and observation-only filter registration/removal. Native GJS/Gio socket
+tests pass with compositor doubles. All six release artifacts and the companion
+ZIP built; archive hashes match on Windows/Linux. Windows executable/MSI version
+metadata and portable launch pass. Linux amd64 installation, upgrade from 0.3.2,
+reinstall, removal, IPC, rollback, configuration restoration and service-account
+isolation pass in the disposable root. ARM64 unit tests and Windows installer
+lifecycle tests were not repeated locally.
+
+The user installed 0.3.3 on test-bravo and logged back into GNOME Wayland. The loaded
+companion is 303, both services are active, and diagnostics advertise the receiver
+motion grace. The installed ARM64 executable matches the release hash. During
+final testing, test-alpha's installed Windows process also reported 0.3.3; its
+installer operation was not observed by this test run.
+
+The user confirmed repeated edge round trips: both MX Keys S and MX Master 3S
+follow, and test-bravo's cursor remains hidden after departure. Live diagnostics agree
+with cursor_hidden=true. A sampled outgoing handoff recorded 23.67 ms to readiness,
+34.09 ms from readiness to queue, and 0.5/0.9 ms receiver dispatch for keyboard/mouse.
+These are diagnostic samples, not radio reconnection measurements or an idle soak.
+M650/unknown-input restoration, the grace-window boundary on physical hardware,
+GDM/locked sessions and new idle resource targets remain hardware-unverified.
+M650 and MX Keys Mini pairings were preserved; no receiver enrollment changed.
+
 ## 0.3.2 — GNOME Wayland placement (2026-09-27)
 
 After test-bravo switched from X11 to GNOME 48.7 Wayland, a bounded companion-socket

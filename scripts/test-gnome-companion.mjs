@@ -110,6 +110,102 @@ assert.equal(notices.at(-1).ok,false,'expired placement must not warp');
 companion._hide('1950000000');
 assert.equal(companion._hidden,false,'old writes cannot hide the cursor');
 await assert.rejects(companion._command({command:'execute'}),/Unknown/);
+// The receiver-level exception is bounded by the successful write, not delivery.
+context.Clutter.EventType = {NOTHING:0, ENTER:1, LEAVE:2, MOTION:3, BUTTON_PRESS:4,
+    KEY_PRESS:5, SCROLL:6, DEVICE_REMOVED:7};
+const corePointer = {};
+companion._seat = {get_pointer: () => corePointer};
+companion._inputFilter = 1;
+companion._connection = {};
+companion._tracker = {set_pointer_visible(v) {visibility.push(v);}};
+companion._inhibited = false;
+const motion = (node, type=3, buttons=0) => ({type:()=>type, get_source_device:()=>({get_device_node:()=>node}), get_state:()=>buttons, get_time:()=>1});
+const arm = id => {
+    now += 1_000_000;
+    companion._armDeparture({id,nodes:['/dev/input/event2']});
+    now += 30_000;
+};
+arm('20');
+companion._reservation = {id:50,serial:companion._serial,previous:[100,100],until:now+1_000_000};
+const beforeTailWarp=warps.length;
+companion._inputEvent(motion('/dev/input/event2'));
+await companion._command({command:'cancel',id:50});
+assert.equal(warps.length,beforeTailWarp,'tail motion still defeats cancellation rollback');
+companion._hide(String(now*1000),'20');
+assert.equal(companion._hidden,true,'receiver tail before acknowledgement does not defeat the hide');
+now += 10_000;
+companion._inputEvent(motion('/dev/input/event2'));
+assert.equal(companion._hidden,true,'receiver tail after acknowledgement does not restore');
+now += 250_000;
+companion._inputEvent(motion('/dev/input/event2'));
+assert.equal(companion._hidden,false,'receiver motion restores outside the 250 ms window even if timer was delayed');
+assert.equal(timers.size,0);
+for (const event of [motion('/dev/input/event9'), motion(null), motion('/dev/input/event2',4),
+    motion('/dev/input/event1',5),motion('/dev/input/event2',6),motion('/dev/input/event2',3,1),motion('/dev/input/event2',7)]) {
+    arm('21');
+    companion._hide(String(now*1000),'21');
+    now += 1000;
+    companion._inputEvent(event);
+    assert.equal(companion._hidden,false,'unknown/virtual input, clicks, keys, scroll, buttons, unplug restore immediately');
+    assert.equal(timers.size,0,'restoration must cancel the delayed final hide');
+    companion._hide(String((now-1000)*1000),'21');
+    assert.equal(companion._hidden,false,'late write notification cannot resurrect a cancelled departure');
+}
+arm('22');
+companion._inputEvent(motion('/dev/input/event9'));
+companion._hide(String(now*1000),'22');
+assert.equal(companion._hidden,false,'unknown input before HID acknowledgement invalidates the arm');
+arm('23');
+const written=now;
+now += 251_000;
+companion._hide(String(written*1000),'23');
+assert.equal(companion._hidden,false,'delayed acknowledgements cannot extend the grace window');
+arm('24');
+companion._hide(String(now*1000),'24');
+const hides=visibility.length;
+now += 250_000;
+for (const [id,callback] of [...timers]) {timers.delete(id); callback();}
+assert.equal(visibility.length,hides+1,'one final hide seals the departure after the tail');
+assert.equal(companion._armed,null);
+assert.equal(timers.size,0,'no idle cursor polling or recurring hide timer');
+companion._inputEvent(motion('/dev/input/event9'));
+assert.equal(companion._hidden,false);
+arm('25');
+companion._restore();
+companion._hide(String(now*1000),'25');
+assert.equal(companion._hidden,false,'arrival/pause/disconnect cleanup cancels the arm');
+arm('26');
+companion._hide(String(now*1000),'wrong');
+assert.equal(companion._hidden,false,'stale transaction cannot hide');
+companion._armDeparture({id:'27',nodes:['/tmp/unknown']});
+assert.equal(companion._armed,null,'only validated input-event node paths are accepted');
+companion._inputFilter=null;
+companion._armDeparture({id:'28',nodes:['/dev/input/event2']});
+assert.equal(companion._armed,null,'unsupported input attribution retains strict restoration');
+// Register the production observer with the native two-argument GJS signature.
+let filterCallback;
+let filterRemoved = false;
+context.Clutter.EVENT_PROPAGATE = false;
+context.Clutter.Event = {
+    add_filter(...args) {assert.equal(args.length,2); filterCallback=args[1]; return 42;},
+    remove_filter(id) {assert.equal(id,42); filterRemoved=true;},
+};
+context.Meta.is_wayland_compositor = () => true;
+context.Main.sessionMode = {connect:()=>1,disconnect() {}};
+context.Main.layoutManager.connect = () => 1;
+context.Main.layoutManager.disconnect = () => {};
+context.global.backend = {get_cursor_tracker:()=>({set_pointer_visible() {}}),
+    get_core_idle_monitor:()=>({})};
+const observer = new context.Companion();
+observer._connect = () => {};
+observer.enable();
+assert.equal(observer._inputFilter,42);
+const key = motion('/dev/input/event1',5);
+key.get_key_code = () => assert.fail('Key contents inspected');
+assert.equal(filterCallback(key),false,'input observer must propagate all events');
+observer.disable();
+assert.equal(filterRemoved,true,'disable removes the observer');
+
 // A read completing after controller replacement cannot apply its old command.
 const oldConnection = {get_input_stream: () => ({})};
 const commandBytes = new TextEncoder().encode(JSON.stringify({command:'hide',written_ns:'1'}));
