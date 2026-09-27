@@ -80,10 +80,12 @@ pub struct Worker {
     pub wake: Wake,
     pub join: Option<std::thread::JoinHandle<()>>,
     pub epoch: Arc<AtomicU64>,
+    pub switch_epoch: Arc<AtomicU64>,
 }
 pub struct PendingSwitch {
     command: SwitchCommand,
     epoch: u64,
+    switch_epoch: u64,
     received_at: Instant,
     departure: Option<Box<dyn FnOnce(Instant) + Send + Sync>>,
     recovery: Option<RecoveryPermission>,
@@ -99,6 +101,12 @@ impl Drop for Worker {
     }
 }
 impl Worker {
+    /// Cancel queued switches without invalidating the applied configuration or
+    /// suppressing subsequent device notifications.
+    pub fn cancel_switches(&self) {
+        self.switch_epoch.fetch_add(1, Ordering::AcqRel);
+        (self.wake)();
+    }
     pub fn send(&self, command: Command) -> Result<()> {
         if let Command::Switch {
             command,
@@ -112,6 +120,7 @@ impl Worker {
                 .try_send(PendingSwitch {
                     command,
                     epoch,
+                    switch_epoch: self.switch_epoch.load(Ordering::Acquire),
                     received_at,
                     departure,
                     recovery,
@@ -199,6 +208,8 @@ pub fn spawn(
     let (switch_tx, switch_rx) = crossbeam_channel::bounded(64);
     let epoch = Arc::new(AtomicU64::new(1));
     let active_epoch = epoch.clone();
+    let switch_epoch = Arc::new(AtomicU64::new(1));
+    let active_switch_epoch = switch_epoch.clone();
     let join = std::thread::Builder::new()
         .name("hid-receiver".into())
         .spawn(move || {
@@ -214,6 +225,7 @@ pub fn spawn(
                 paused,
                 epoch: 1,
                 active_epoch,
+                active_switch_epoch,
                 generation,
                 armed: BTreeMap::new(),
                 reporting_checks: BTreeSet::new(),
@@ -233,6 +245,7 @@ pub fn spawn(
         wake,
         join: Some(join),
         epoch,
+        switch_epoch,
     })
 }
 
@@ -247,6 +260,7 @@ struct Session {
     paused: bool,
     epoch: u64,
     active_epoch: Arc<AtomicU64>,
+    active_switch_epoch: Arc<AtomicU64>,
     generation: u64,
     // Value is true for passive analytics, false for temporary diversion.
     armed: BTreeMap<(u8, u16), bool>,
@@ -344,6 +358,7 @@ impl Session {
                         self.dispatch_switch(PendingSwitch {
                             command,
                             epoch,
+                            switch_epoch: self.active_switch_epoch.load(Ordering::Acquire),
                             received_at,
                             departure,
                             recovery,
@@ -440,10 +455,14 @@ impl Session {
         let PendingSwitch {
             command,
             epoch,
+            switch_epoch,
             received_at,
             departure,
             recovery,
         } = pending;
+        if switch_epoch != self.active_switch_epoch.load(Ordering::Acquire) {
+            return Ok(());
+        }
         self.retries.remove(&command.slot);
         if let Some(permission) = recovery {
             if permission.epoch.load(Ordering::SeqCst) != permission.version {
@@ -454,6 +473,7 @@ impl Session {
                 FollowerRetry {
                     command: command.clone(),
                     epoch,
+                    switch_epoch,
                     permission,
                     checks: 0,
                     input_serial: self.device_input.get(&command.slot).copied().unwrap_or(0),
@@ -479,6 +499,9 @@ impl Session {
             return Ok(());
         };
         let name = d.name.clone();
+        if switch_epoch != self.active_switch_epoch.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let write_started = Instant::now();
         let result = self.transport.write(&protocol::request(
             command.slot,
@@ -873,6 +896,7 @@ mod tests {
                 paused: false,
                 epoch: 1,
                 active_epoch: Arc::new(AtomicU64::new(1)),
+                active_switch_epoch: Arc::new(AtomicU64::new(1)),
                 generation: 1,
                 armed: BTreeMap::new(),
                 reporting_checks: BTreeSet::new(),
@@ -921,6 +945,7 @@ mod tests {
                 generation: 1,
             },
             epoch: 1,
+            switch_epoch: 1,
             received_at: Instant::now(),
             departure: None,
             recovery: None,
@@ -1187,6 +1212,65 @@ mod tests {
         }
     }
     #[test]
+    fn repeated_handoff_cancellation_keeps_manual_switches_and_notifications_working() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut s, events) = session(dir.path(), vec![], false);
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        s.transport = Box::new(FakeTransport {
+            frames: Default::default(),
+            writes: writes.clone(),
+            fail: false,
+        });
+        s.devices.insert(2, device());
+        let (switches, urgent) = crossbeam_channel::bounded(8);
+        s.switches = urgent;
+        let worker = Worker {
+            session: 1,
+            tx: crossbeam_channel::bounded(1).0,
+            switches,
+            wake: Arc::new(|| {}),
+            join: None,
+            epoch: s.active_epoch.clone(),
+            switch_epoch: s.active_switch_epoch.clone(),
+        };
+        let send = |edge| {
+            let mut p = pending_switch();
+            if edge {
+                p.command.expires = Some(Instant::now() + Duration::from_secs(1));
+            }
+            worker
+                .send(Command::Switch {
+                    command: p.command,
+                    epoch: worker.epoch.load(Ordering::Acquire),
+                    received_at: p.received_at,
+                    departure: None,
+                    recovery: None,
+                })
+                .unwrap();
+        };
+        for round in 0..3 {
+            send(true);
+            worker.cancel_switches();
+            s.dispatch_pending_switches().unwrap();
+            assert_eq!(
+                writes.lock().unwrap().len(),
+                round * 2,
+                "Old queued handoff was not cancelled"
+            );
+            send(false);
+            send(true);
+            s.dispatch_pending_switches().unwrap();
+            assert_eq!(
+                writes.lock().unwrap().len(),
+                (round + 1) * 2,
+                "Fresh manual and edge commands must survive cancellation"
+            );
+            s.receive(&protocol::request(2, 9, 0, &[]).unwrap());
+            assert!(events.try_iter().any(|e| matches!(e, Event::Report { epoch, .. } if epoch == worker.epoch.load(Ordering::Acquire))));
+            assert_eq!(s.epoch, worker.epoch.load(Ordering::Acquire));
+        }
+    }
+    #[test]
     fn worker_routes_switches_around_a_full_management_queue() {
         let (tx, rx) = crossbeam_channel::bounded(1);
         let (switches, urgent) = crossbeam_channel::bounded(1);
@@ -1201,6 +1285,7 @@ mod tests {
             }),
             join: None,
             epoch: Arc::new(AtomicU64::new(1)),
+            switch_epoch: Arc::new(AtomicU64::new(1)),
         };
         worker.send(Command::Refresh).unwrap();
         let PendingSwitch {
@@ -1209,6 +1294,7 @@ mod tests {
             received_at,
             departure,
             recovery,
+            ..
         } = pending_switch();
         worker
             .send(Command::Switch {
@@ -1399,6 +1485,7 @@ impl RecoveryPermission {
 struct FollowerRetry {
     command: SwitchCommand,
     epoch: u64,
+    switch_epoch: u64,
     permission: RecoveryPermission,
     checks: u8,
     input_serial: u64,
@@ -1422,6 +1509,7 @@ impl Session {
         !self.paused
             && r.epoch == self.epoch
             && r.epoch == self.active_epoch.load(Ordering::Acquire)
+            && r.switch_epoch == self.active_switch_epoch.load(Ordering::Acquire)
             && r.permission.valid()
             && self.device_input.get(&r.command.slot).copied().unwrap_or(0) == r.input_serial
             && Instant::now() < r.until

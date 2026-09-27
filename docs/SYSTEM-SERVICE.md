@@ -1,4 +1,4 @@
-# Linux system operation (0.3.0)
+# Linux system operation (0.3.1)
 
 System operation is optional. Installing the package does not enable it or change
 the login screen. The ordinary user-session monitor remains the default.
@@ -6,7 +6,7 @@ the login screen. The ordinary user-session monitor remains the default.
 ## Enable and disable
 
 First save a working configuration as the intended desktop user. Install the
-0.3.0 `.deb`, then choose one of these administrative operations:
+0.3.1 `.deb`, then choose one of these administrative operations:
 
 ```sh
 # Hardware synchronization before login, with session-only LAN coordination:
@@ -46,7 +46,7 @@ restarting the service resumes its saved configuration.
 ## GNOME companion
 
 The package installs `easy-switch-link@duncm.github.com` system-wide. It supports
-the modern extension format for GNOME 45–51 with runtime API checks; supported
+the modern extension format for GNOME 45â€“51 with runtime API checks; supported
 metadata is not a claim of hardware validation for every Shell release.
 
 To use the companion without login-screen networking:
@@ -64,11 +64,11 @@ requires installing its system units, accounts, helper and permission setup;
 simply running the standalone executable as root is not equivalent.
 
 For a manual system installation, use the release executable matching the host
-architecture and the matching 0.3.0 source checkout. On a systemd/udev distribution
+architecture and the matching 0.3.1 source checkout. On a systemd/udev distribution
 with Python 3 installed, run these from the checkout (replace the executable path):
 
 ```sh
-sudo install -m 755 /path/to/easy-switch-link-0.3.0-linux-arm64 /usr/bin/easy-switch-link
+sudo install -m 755 /path/to/easy-switch-link-0.3.1-linux-arm64 /usr/bin/easy-switch-link
 sudo install -d /usr/lib/easy-switch-link /usr/lib/sysusers.d /usr/lib/udev/rules.d
 sudo install -m 755 packaging/linux/service-admin /usr/lib/easy-switch-link/service-admin
 sudo install -m 644 packaging/linux/easy-switch-link.sysusers /usr/lib/sysusers.d/easy-switch-link.conf

@@ -466,7 +466,7 @@ impl Monitor {
     fn invalidate(&mut self) {
         self.edge_epoch.fetch_add(1, Ordering::SeqCst);
         for worker in self.workers.values() {
-            worker.epoch.fetch_add(1, Ordering::AcqRel);
+            worker.cancel_switches();
         }
     }
     fn configure(&mut self) -> Result<()> {
@@ -1014,6 +1014,7 @@ mod tests {
             wake: std::sync::Arc::new(|| {}),
             join: None,
             epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            switch_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
         };
         let mut monitor = Monitor {
             #[cfg(target_os = "linux")]
@@ -1039,6 +1040,16 @@ mod tests {
             edge_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             ambiguous: Default::default(),
         };
+        monitor.invalidate();
+        assert_eq!(
+            monitor.workers["bolt"].epoch.load(Ordering::Acquire),
+            1,
+            "Handoff cancellation must not invalidate the applied configuration"
+        );
+        assert_eq!(
+            monitor.workers["bolt"].switch_epoch.load(Ordering::Acquire),
+            2
+        );
         monitor.event(Event::Lost("bolt".into(), 1, "stale disconnect".into()));
         monitor.event(Event::Ready("bolt".into(), 1));
         monitor.event(Event::Conflict("bolt".into(), 1, "old device".into()));

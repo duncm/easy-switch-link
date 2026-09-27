@@ -1,5 +1,42 @@
 # Validation
 
+## 0.3.1 — return switching in system mode (2026-09-27)
+
+An incoming edge handoff called receiver invalidation, which advanced the shared
+configuration epoch without applying a new configuration to the worker. Later
+manual/edge writes were silently discarded and notifications carried an obsolete
+epoch. A configuration change temporarily repaired the mismatch, explaining the
+intermittent behavior. On test-bravo, an observed failed return was reported as queued
+without corresponding device-write messages, while device availability was stale.
+
+Switch cancellation now uses its own generation. It rejects old queued commands
+and follower retries while preserving the applied configuration and subsequent
+notifications. Configuration, pause, identity, disconnect and expiry checks remain
+independent. Regression coverage exercises three cancellation cycles followed by
+manual and edge writes, notification delivery, and monitor-level invalidation.
+
+Windows x64 passes 61 tests; Linux amd64 passes 67 tests in the Ubuntu 22.04
+baseline environment. Strict workspace Clippy and formatting pass. ARM64 is
+cross-built against the same baseline; native ARM64 unit tests were not rerun for
+this patch after test-bravo's reboot cleared the temporary build environment.
+All six release artifacts and the companion ZIP were rebuilt with verified
+checksums. The ARM64 portable executable launches on test-bravo and reports 0.3.1.
+Linux package upgrade/reinstall/removal, activation rollback, configuration
+restoration and service-account isolation checks pass in the disposable root.
+
+The user installed 0.3.1 on test-bravo; its installed binary hash matches the release
+portable executable. Both dedicated services restarted and the session tray was
+restored. The user confirmed three test-alpha → test-bravo → test-alpha edge round trips
+and a further manual return, with both MX Keys S and MX Master 3S following every
+time. This was GNOME X11 in an unlocked session; test-alpha remained on 0.3.0.
+
+Test-bravo's live status recorded repeated mouse/keyboard HID writes (0.4–1.4 ms
+receiver dispatch in the sampled messages), and one guarded keyboard recovery
+after fresh source-host and no-input confirmation. A sampled edge preparation
+took 0.78 ms and readiness-to-queue took 30.64 ms. These are diagnostic samples,
+not measured radio reconnection latency or a performance soak. The 0.3.0 GDM,
+lock-screen and physical Wayland validation limits still apply.
+
 ## 0.3.0 — optional Linux services and GNOME companion (2026-09-27)
 
 ### Automated and native-runtime checks
