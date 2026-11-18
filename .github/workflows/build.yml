@@ -1,8 +1,11 @@
 name: Build and validate
 on:
   push:
+    branches: ['**']
+    tags-ignore: ['v*']
   pull_request:
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
 jobs:
@@ -30,11 +33,11 @@ jobs:
           ./scripts/build-windows.ps1
       - name: Portable smoke test
         run: |
-          & ./dist/easy-switch-link-0.3.4-windows-x64.exe --help | Out-String
+          & ./dist/easy-switch-link-0.3.5-windows-x64.exe --help | Out-String
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: MSI install and uninstall smoke test
         run: |
-          $msi = (Resolve-Path ./dist/easy-switch-link-0.3.4-windows-x64.msi).Path
+          $msi = (Resolve-Path ./dist/easy-switch-link-0.3.5-windows-x64.msi).Path
           $install = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", '/qn', '/norestart') -Wait -PassThru -WindowStyle Hidden
           if ($install.ExitCode -notin @(0,3010)) { throw "MSI install failed: $($install.ExitCode)" }
           & "$env:LOCALAPPDATA/Easy-Switch Link/easy-switch-link.exe" --version | Out-String
@@ -43,6 +46,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64
+          if-no-files-found: error
+          overwrite: true
           path: |
             dist/*.exe
             dist/*.msi
@@ -83,9 +88,9 @@ jobs:
           bash scripts/build-linux.sh '${{ matrix.target }}'
       - name: Package and portable smoke tests
         run: |
-          dist/easy-switch-link-0.3.4-linux-${{ matrix.arch }} --help
-          dpkg-deb --info dist/easy-switch-link_0.3.4_${{ matrix.arch }}.deb
-          apt-get install -y ./dist/easy-switch-link_0.3.4_${{ matrix.arch }}.deb
+          dist/easy-switch-link-0.3.5-linux-${{ matrix.arch }} --help
+          dpkg-deb --info dist/easy-switch-link_0.3.5_${{ matrix.arch }}.deb
+          apt-get install -y ./dist/easy-switch-link_0.3.5_${{ matrix.arch }}.deb
           easy-switch-link --version
           easy-switch-link --config-dir /tmp/esl-smoke run --headless &
           monitor=$!
@@ -94,11 +99,13 @@ jobs:
           easy-switch-link --config-dir /tmp/esl-smoke quit
           wait "$monitor"
           apt-get remove -y easy-switch-link
-          ESL_DISPOSABLE_ROOT=1 dbus-run-session -- python3 scripts/test-tray-startup.py dist/easy-switch-link-0.3.4-linux-${{ matrix.arch }}
+          ESL_DISPOSABLE_ROOT=1 dbus-run-session -- python3 scripts/test-tray-startup.py dist/easy-switch-link-0.3.5-linux-${{ matrix.arch }}
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.arch }}
+          if-no-files-found: error
+          overwrite: true
           path: |
-            dist/easy-switch-link-0.3.4-linux-${{ matrix.arch }}
+            dist/easy-switch-link-0.3.5-linux-${{ matrix.arch }}
             dist/*_${{ matrix.arch }}.deb
             dist/SHA256SUMS-linux-${{ matrix.arch }}.txt

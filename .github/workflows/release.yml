@@ -1,0 +1,95 @@
+name: Publish release
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check-tag:
+    if: ${{ !github.event.deleted }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check release version
+        run: |
+          python3 - <<'PY'
+          import os
+          import tomllib
+          from xml.etree import ElementTree
+
+          with open("Cargo.toml", "rb") as manifest:
+              version = tomllib.load(manifest)["workspace"]["package"]["version"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag != f"v{version}":
+              raise SystemExit(f"Tag {tag!r} must match workspace version v{version}.")
+
+          package = ElementTree.parse("packaging/windows/main.wxs").find("{*}Package")
+          if package.get("Version") != version:
+              raise SystemExit(f"The Windows installer version must match {version}.")
+          PY
+
+  build:
+    needs: check-tag
+    uses: ./.github/workflows/build.yml
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Verify assets and publish
+        working-directory: release-assets
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+          checksums=(SHA256SUMS-windows.txt SHA256SUMS-linux-amd64.txt SHA256SUMS-linux-arm64.txt)
+          assets=(
+            "easy-switch-link-${version}-windows-x64.exe"
+            "easy-switch-link-${version}-windows-x64.msi"
+            "easy-switch-link-${version}-linux-amd64"
+            "easy-switch-link_${version}_amd64.deb"
+            "easy-switch-link-${version}-linux-arm64"
+            "easy-switch-link_${version}_arm64.deb"
+            "easy-switch-link-${version}-gnome.shell-extension.zip"
+            "${checksums[@]}"
+          )
+          for asset in "${assets[@]}"; do
+            if [[ ! -s "$asset" ]]; then
+              echo "Missing or empty release asset: $asset" >&2
+              exit 1
+            fi
+          done
+          sed -i 's/\r$//' SHA256SUMS-windows.txt
+          sha256sum --check --strict "${checksums[@]}"
+
+          if ! release=$(gh release view "$tag" --json isDraft,assets --jq '.isDraft, .assets[].name' 2>/dev/null); then
+            gh release create "$tag" --verify-tag --generate-notes --title "$tag" "${assets[@]}"
+          elif [[ ${release%%$'\n'*} == true ]]; then
+            gh release upload "$tag" --clobber "${assets[@]}"
+            gh release edit "$tag" --draft=false
+          else
+            for asset in "${assets[@]}"; do
+              if ! grep -Fxq -- "$asset" <<< "$release"; then
+                echo "Published release $tag is missing $asset" >&2
+                exit 1
+              fi
+            done
+            echo "Release $tag is already published with all expected assets."
+          fi

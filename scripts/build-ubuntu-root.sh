@@ -21,4 +21,4 @@ cd /work
 cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets -- -D warnings
 bash scripts/build-linux.sh x86_64-unknown-linux-gnu
-dbus-run-session -- python3 scripts/test-tray-startup.py dist/easy-switch-link-0.3.4-linux-amd64
+dbus-run-session -- python3 scripts/test-tray-startup.py dist/easy-switch-link-0.3.5-linux-amd64

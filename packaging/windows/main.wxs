@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package Name="Easy-Switch Link" Manufacturer="Duncan Maitland" Version="0.3.4" UpgradeCode="40CC718D-B86C-42D7-B1A3-7E1DB7477804" Scope="perUser">
+  <Package Name="Easy-Switch Link" Manufacturer="Duncan Maitland" Version="0.3.5" UpgradeCode="40CC718D-B86C-42D7-B1A3-7E1DB7477804" Scope="perUser">
     <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of Easy-Switch Link is already installed." />
     <MediaTemplate EmbedCab="yes" />
     <Icon Id="AppIcon" SourceFile="$(var.ProjectDir)\assets\easy-switch-link.ico" />

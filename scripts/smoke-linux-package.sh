@@ -4,11 +4,11 @@ set -euo pipefail
 test "${ESL_DISPOSABLE_ROOT:-}" = 1 || { echo 'Set ESL_DISPOSABLE_ROOT=1 in an isolated test root' >&2; exit 1; }
 cd /work
 export DEBIAN_FRONTEND=noninteractive
-package=dist/easy-switch-link_0.3.4_amd64.deb
+package=dist/easy-switch-link_0.3.5_amd64.deb
 if test -f dist/previous.deb; then apt-get install --allow-downgrades -y ./dist/previous.deb; fi
 apt-get install -y "./$package"
 apt-get install --reinstall -y "./$package"
-easy-switch-link --version | grep '0.3.4'
+easy-switch-link --version | grep '0.3.5'
 test ! -f /etc/easy-switch-link/policy.json
 test ! -L /etc/systemd/system/multi-user.target.wants/easy-switch-link-hardware.service
 easy-switch-link --config-dir /tmp/esl-user-smoke run --headless > /tmp/esl-user-smoke.log 2>&1 &

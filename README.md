@@ -1,6 +1,7 @@
 # Easy-Switch Link
 
-Version 0.3.4 fixes tray registration when GNOME starts its indicator extension late.
+Version 0.3.5 publishes portable executables and installers from GitHub version tags.
+Version 0.3.4 fixed tray registration when GNOME starts its indicator extension late.
 Version 0.3.3 added a bounded receiver-motion grace period for GNOME Wayland cursor hiding.
 Version 0.3.2 fixed asynchronous cursor placement for incoming GNOME Wayland handoffs.
 Version 0.3.0 added optional Linux system services, passive Wayland retry
@@ -37,9 +38,9 @@ Download the appropriate artifact from `dist/` or the project's release artifact
 
 | Platform | Portable | Installer |
 | --- | --- | --- |
-| Windows 10/11 x64 | `easy-switch-link-0.3.4-windows-x64.exe` | `easy-switch-link-0.3.4-windows-x64.msi` |
-| Linux amd64 | `easy-switch-link-0.3.4-linux-amd64` | `easy-switch-link_0.3.4_amd64.deb` |
-| Linux arm64 | `easy-switch-link-0.3.4-linux-arm64` | `easy-switch-link_0.3.4_arm64.deb` |
+| Windows 10/11 x64 | `easy-switch-link-0.3.5-windows-x64.exe` | `easy-switch-link-0.3.5-windows-x64.msi` |
+| Linux amd64 | `easy-switch-link-0.3.5-linux-amd64` | `easy-switch-link_0.3.5_amd64.deb` |
+| Linux arm64 | `easy-switch-link-0.3.5-linux-arm64` | `easy-switch-link_0.3.5_arm64.deb` |
 
 1. Pair your devices to each computer using Logitech's normal pairing procedure.
    Each participating computer needs a compatible receiver and this application.
@@ -64,14 +65,14 @@ can be restored. User configuration, device caches and recovery journals are ret
 ### Linux
 
 Debian 12+ and Ubuntu 22.04+ are the compatibility baseline. Install the `.deb`
-using `sudo apt install ./easy-switch-link_0.3.4_amd64.deb` (or the arm64 package).
+using `sudo apt install ./easy-switch-link_0.3.5_amd64.deb` (or the arm64 package).
 The package installs receiver permissions, a desktop launcher, icon and optional
 systemd user service. Reconnect the receiver if access is denied after installation.
 
 For the standalone executable, make it executable and install standard libraries:
 
 ```sh
-chmod +x easy-switch-link-0.3.4-linux-amd64
+chmod +x easy-switch-link-0.3.5-linux-amd64
 sudo apt install libudev1 libxkbcommon0 libxkbcommon-x11-0 libegl1 libgl1 libx11-6 libxi6 libxrandr2 libxcursor1 libwayland-client0 libwayland-cursor0 libwayland-egl1
 sudo install -m 644 packaging/linux/70-easy-switch-link.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
@@ -227,6 +228,12 @@ bash scripts/build-linux.sh aarch64-unknown-linux-gnu
 Each script writes release artifacts and SHA-256 checksums to `dist/`. CI builds
 both Linux architectures on native runners and Windows x64, checks packages and
 retains downloadable artifacts. It does not claim hardware validation.
+
+Pushing a tag such as `v0.3.5` runs the same build and smoke tests before
+publishing a GitHub release. The tag must match the workspace version in
+`Cargo.toml` and the Windows installer version. The release includes the
+portable executables, `.msi` and `.deb` packages, the GNOME companion archive,
+and SHA-256 checksums.
 
 ## Protocol references
 

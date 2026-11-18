@@ -1,5 +1,19 @@
 # Validation
 
+## 0.3.5 - GitHub release publishing (2026-11-18)
+
+Formatting, strict Clippy, and all 61 Windows workspace tests passed. The
+Windows x64 executable and MSI built successfully. The executable reports 0.3.5,
+the MSI ProductVersion is 0.3.5, and all Windows artifact checksums verified.
+
+The GNOME companion checks passed and the companion archive carries version
+305 (0.3.5). Both GitHub Actions workflows passed actionlint. Local release
+simulations verified tag and version matching, checksum checks, draft recovery,
+and rejection of missing or corrupt assets.
+
+Linux amd64 and arm64 builds and smoke tests, the Windows installer lifecycle,
+physical hardware, and a live GitHub release run remain unverified for 0.3.5.
+
 ## 0.3.4 — tray startup ordering (2026-09-27)
 
 Test-bravo's XDG-autostart session companion was running, but its journal reported
